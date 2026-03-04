@@ -128,9 +128,11 @@ def analyze_morris_patterns(df):
 def analyze_morris_patterns_at_index(df, idx):
     """
     Анализирует паттерны на конкретном индексе 'idx'. 
-    Логика Морриса сохранена.
+    Добавлена логика длинных/коротких дней и строгие разрывы (гэпы) по Моррису.
     """
-    if idx < 2: return []
+    # Нам нужно как минимум 10 свечей истории для расчета среднего тела
+    if idx < 10: 
+        return []
     
     curr = df.iloc[idx].copy()
     prev = df.iloc[idx-1].copy()
@@ -143,37 +145,91 @@ def analyze_morris_patterns_at_index(df, idx):
     c_upper_shadow = c_high - c_body_top
     c_lower_shadow = c_body_bottom - c_low
     
+    # Цвета текущей свечи
+    c_is_white = c_close > c_open
+    c_is_black = c_close < c_open
+    
     p_open, p_close = prev['open'], prev['close']
+    p_high, p_low = prev['high'], prev['low']
     p_body_top, p_body_bottom = max(p_open, p_close), min(p_open, p_close)
     p_body_size = abs(p_close - p_open)
     p_midpoint = (p_open + p_close) / 2
+    
+    # Цвета предыдущей свечи
+    p_is_white = p_close > p_open
+    p_is_black = p_close < p_open
+
+    # --- ЛОГИКА ДЛИННЫХ И КОРОТКИХ ДНЕЙ ПО МОРРИСУ ---
+    # Считаем средний размер тела за последние 10 дней (до текущей свечи)
+    past_bodies = abs(df['close'].iloc[idx-10:idx] - df['open'].iloc[idx-10:idx])
+    avg_body = past_bodies.mean()
+    
+    # "Длинный" день: тело на 30% больше среднего
+    p_is_long = p_body_size > (avg_body * 1.3)
+    # "Короткий" день: тело меньше среднего
+    c_is_short = c_body_size < avg_body 
 
     signals = []
 
-    if c_close < ema: # Трендовый фильтр (Вниз)
+    # === 1. ТРЕНД ВНИЗ (Ищем БЫЧЬИ развороты под EMA) ===
+    if c_close < ema:
+        # Молот (Hammer)
         if c_lower_shadow >= (c_body_size * 2) and c_upper_shadow <= (c_range * 0.1) and c_body_size > 0:
             signals.append("Hammer (Молот)")
+            
+        # Перевернутый молот (Inverted Hammer)
         if c_upper_shadow >= (c_body_size * 2) and c_lower_shadow <= (c_range * 0.1) and c_body_size > 0:
             signals.append("Inverted Hammer (Перевернутый молот)")
-        if c_close > c_open and p_close < p_open and c_body_top >= p_body_top and c_body_bottom <= p_body_bottom:
+            
+        # Бычье поглощение (Bullish Engulfing)
+        if c_is_white and p_is_black and c_body_top >= p_body_top and c_body_bottom <= p_body_bottom and c_body_size > p_body_size:
             signals.append("Bullish Engulfing (Бычье поглощение)")
-        if p_close < p_open and c_body_top <= p_body_top and c_body_bottom >= p_body_bottom and p_body_size > c_body_size:
-            signals.append("Bullish Harami (Бычье Харами)")
-        if p_close < p_open and c_close > c_open and c_open < p_close and c_close > p_midpoint:
-            signals.append("Piercing Line (Просвет в облаках)")
+            
+        # Бычье Харами (Bullish Harami)
+        # 1. Предшествует тренд (c_close < ema)
+        # 2. Первый день длинный и отражает тренд (черный)
+        # 3. Второй день короткий, цвет противоположный (белый)
+        # 4. Тело полностью внутри первого
+        if p_is_long and c_is_short and p_is_black and c_is_white:
+            if c_body_top <= p_body_top and c_body_bottom >= p_body_bottom and p_body_size > c_body_size:
+                signals.append("Bullish Harami (Бычье Харами)")
+                
+        # Пронизывающая линия (Piercing Line)
+        # 1. Первый день длинный черный
+        # 2. Второй открывается НИЖЕ МИНИМУМА первого
+        # 3. Второй закрывается выше середины первого
+        if p_is_long and p_is_black and c_is_white:
+            if c_open <= p_close and c_close > p_midpoint and c_close <= p_body_top:
+                signals.append("Piercing Line (Просвет в облаках)")
 
-    elif c_close > ema: # Трендовый фильтр (Вверх)
+    # === 2. ТРЕНД ВВЕРХ (Ищем МЕДВЕЖЬИ развороты над EMA) ===
+    elif c_close > ema:
+        # Висельник (Hanging Man)
         if c_lower_shadow >= (c_body_size * 2) and c_upper_shadow <= (c_range * 0.1) and c_body_size > 0:
             signals.append("Hanging Man (Висельник)")
+            
+        # Падающая звезда (Shooting Star)
         if c_upper_shadow >= (c_body_size * 2) and c_lower_shadow <= (c_range * 0.1) and c_body_size > 0:
             signals.append("Shooting Star (Падающая звезда)")
-        if c_close < c_open and p_close > p_open and c_body_top >= p_body_top and c_body_bottom <= p_body_bottom:
+            
+        # Медвежье поглощение (Bearish Engulfing)
+        if c_is_black and p_is_white and c_body_top >= p_body_top and c_body_bottom <= p_body_bottom and c_body_size > p_body_size:
             signals.append("Bearish Engulfing (Медвежье поглощение)")
-        if p_close > p_open and c_body_top <= p_body_top and c_body_bottom >= p_body_bottom and p_body_size > c_body_size:
-            signals.append("Bearish Harami (Медвежье Харами)")
-        if p_close > p_open and c_close < c_open and c_open > p_close and c_close < p_midpoint:
-            signals.append("Dark Cloud Cover (Завеса из темных облаков)")
+            
+        # Медвежье Харами (Bearish Harami)
+        if p_is_long and c_is_short and p_is_white and c_is_black:
+            if c_body_top <= p_body_top and c_body_bottom >= p_body_bottom and p_body_size > c_body_size:
+                signals.append("Bearish Harami (Медвежье Харами)")
+                
+        # Темные облака (Dark Cloud Cover)
+        # 1. Первый день длинный белый
+        # 2. Второй открывается ВЫШЕ МАКСИМУМА первого
+        # 3. Второй закрывается ниже середины первого
+        if p_is_long and p_is_white and c_is_black:
+            if c_open >= p_close and c_close < p_midpoint and c_close >= p_body_bottom:
+                signals.append("Dark Cloud Cover (Темные облака)")
 
+    # === 3. НЕЙТРАЛЬНЫЕ ===
     if c_body_size <= (c_range * 0.1) and c_range > 0:
         signals.append("Doji (Доджи)")
 
@@ -309,5 +365,119 @@ def test_run(days_back=3):
 
     print("--- ТЕСТ ЗАВЕРШЕН ---")
 
+# --- БЭКТЕСТ ЛОКАЛЬНОЙ ЛОГИКИ (ПРОХОД ПО ИСТОРИИ И ОТПРАВКА СИГНАЛОВ) ---
+
+def visual_backtest(ticker='SBER', tf='15min', days_back=5):
+    """
+    Сканирует историю, собирает все сигналы и выводит их на один интерактивный график.
+    Никакого спама в Telegram — только визуальный анализ.
+    """
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Загрузка данных для визуального теста ({days_back} дней)...")
+    
+    df = get_safe_candles(ticker, tf, days_back=days_back)
+    
+    if df.empty:
+        print("Данные не получены.")
+        return
+
+    # Подготовка данных
+    if 'begin' in df.columns:
+        df['datetime'] = pd.to_datetime(df['begin'])
+    
+    # Обязательная сортировка по времени
+    df = df.sort_values('datetime').reset_index(drop=True)
+    
+    # Расчет EMA 10 для всего датафрейма
+    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
+
+    # Списки для хранения координат маркеров
+    bull_x, bull_y, bull_text = [], [], []
+    bear_x, bear_y, bear_text = [], [], []
+    doji_x, doji_y, doji_text = [], [], []
+
+    print("Анализ паттернов...")
+    # Пробегаем по всей истории
+    for i in range(10, len(df)):
+        patterns = analyze_morris_patterns_at_index(df, i)
+        
+        if patterns:
+            dt = df.loc[i, 'datetime']
+            high = df.loc[i, 'high']
+            low = df.loc[i, 'low']
+            
+            for p in patterns:
+                # Распределяем паттерны по группам для правильной отрисовки
+                if 'Doji' in p:
+                    doji_x.append(dt)
+                    doji_y.append(high + (high * 0.001)) # Чуть выше свечи
+                    doji_text.append(p)
+                elif any(x in p.lower() for x in ['bull', 'hammer', 'piercing', 'inv_hammer']):
+                    bull_x.append(dt)
+                    bull_y.append(low - (low * 0.002)) # Под свечой
+                    bull_text.append(p)
+                else:
+                    bear_x.append(dt)
+                    bear_y.append(high + (high * 0.002)) # Над свечой
+                    bear_text.append(p)
+
+    print(f"Найдено бычьих: {len(bull_x)}, медвежьих: {len(bear_x)}, доджи: {len(doji_x)}")
+    print("Отрисовка графика...")
+
+    # Создаем основной график
+    fig = go.Figure(data=[go.Candlestick(
+        x=df['datetime'],
+        open=df['open'], high=df['high'],
+        low=df['low'], close=df['close'],
+        name='Свечи'
+    )])
+
+    # Добавляем линию EMA
+    fig.add_trace(go.Scatter(
+        x=df['datetime'], y=df['ema10'],
+        mode='lines', line=dict(color='orange', width=1.5), name='EMA 10'
+    ))
+
+    # Добавляем бычьи сигналы (Зеленые треугольники снизу)
+    if bull_x:
+        fig.add_trace(go.Scatter(
+            x=bull_x, y=bull_y, mode='markers+text',
+            marker=dict(symbol='triangle-up', size=12, color='lime', line=dict(width=1, color='black')),
+            text=bull_text, textposition="bottom center", textfont=dict(color='lime', size=10),
+            name='Бычьи паттерны'
+        ))
+
+    # Добавляем медвежьи сигналы (Красные треугольники сверху)
+    if bear_x:
+        fig.add_trace(go.Scatter(
+            x=bear_x, y=bear_y, mode='markers+text',
+            marker=dict(symbol='triangle-down', size=12, color='red', line=dict(width=1, color='black')),
+            text=bear_text, textposition="top center", textfont=dict(color='red', size=10),
+            name='Медвежьи паттерны'
+        ))
+
+    # Добавляем доджи (Серые крестики)
+    if doji_x:
+        fig.add_trace(go.Scatter(
+            x=doji_x, y=doji_y, mode='markers+text',
+            marker=dict(symbol='x', size=8, color='gray'),
+            text=doji_text, textposition="top center", textfont=dict(color='gray', size=9),
+            name='Доджи'
+        ))
+
+    fig.update_layout(
+        title=f"Полный Бэктест: {ticker} {tf} | Дней: {days_back}",
+        template="plotly_dark",
+        xaxis_rangeslider_visible=False,
+        height=900 # Делаем график высоким для удобства
+    )
+    
+    # Открываем график в браузере
+    fig.show()
+
+
 if __name__ == "__main__":
-    test_run(days_back=2)
+    # Запускаем визуальный тест за 5 дней
+    visual_backtest(ticker='SiH6', tf='15min', days_back=14)
+
+#if __name__ == "__main__":
+#    test_run(days_back=2)

@@ -1,13 +1,19 @@
+# MorrisBot — зависимости
+# Установка: pip install -r requirements.txt
 
-moexalgo
+# Данные и математика
+pandas>=2.0.0
+numpy>=1.24.0
 
-pandas
-numpy
+# Графики и скриншоты
+plotly>=5.18.0
+kaleido==0.2.1          # Фиксируем: новые версии ломают write_image на Linux
 
-TA-Lib
+# MOEX данные
+moexalgo>=0.2.0
 
-# Визуализация
-plotly
+# HTTP-запросы (Telegram API)
+requests>=2.31.0
 
-python-telegram-bot
-python-dotenv
+# Переменные окружения
+python-dotenv>=1.0.0

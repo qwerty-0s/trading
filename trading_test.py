@@ -224,6 +224,7 @@ class ScannerConfig:
         self.long_body_coeff  = long_body_coeff  or float(os.getenv("DEFAULT_LONG_BODY_COEFF", 1.3))
         self.short_body_coeff = short_body_coeff or float(os.getenv("DEFAULT_SHORT_BODY_COEFF", 0.5))
         self.shadow_limit     = shadow_limit     or float(os.getenv("DEFAULT_SHADOW_LIMIT", 0.1))
+        # Индикатор по умолчанию — RSI с параметрами из .env
         self.indicator: BaseIndicator = indicator or NoIndicator()
 
 
@@ -503,8 +504,9 @@ class TelegramRouter:
         topics = {}
         for key, value in os.environ.items():
             if key.startswith("TOPIC_"):
-                # TOPIC_SBER_15MIN -> "SBER_15MIN"
-                route_key = key[len("TOPIC_"):]
+                # TOPIC_SiM6_15MIN -> "SIM6_15MIN"  (всегда upper, чтобы
+                # совпадало с _get_thread_id независимо от кейса в .env)
+                route_key = key[len("TOPIC_"):].upper()
                 try:
                     topics[route_key] = int(value)
                 except ValueError:
@@ -512,8 +514,8 @@ class TelegramRouter:
         return topics
 
     def _get_thread_id(self, ticker: str, tf: str) -> Optional[int]:
-        # Нормализуем: "15min" -> "15MIN", "SBER" -> "SBER"
-        key = f"{ticker.upper()}_{tf.upper().replace('MIN', 'MIN')}"
+        # Нормализуем: "SiM6" -> "SIM6", "15min" -> "15MIN"
+        key = f"{ticker.upper()}_{tf.upper()}"
         thread_id = self._topics.get(key)
         if thread_id is None:
             print(f"[TelegramRouter] Тема не найдена для ключа: {key}. Отправляю в общий чат.")
@@ -551,7 +553,7 @@ class TelegramRouter:
                     f"{self._base_url}/sendPhoto",
                     data=payload,
                     files={"photo": f},
-                    timeout=15
+                    timeout=60
                 )
                 resp.raise_for_status()
         except requests.RequestException as e:
@@ -826,7 +828,6 @@ def visual_backtest(ticker: str = 'SBER',
     fig.show()
 
 
-
 def test_telegram(ticker: str, tf: str):
     """
     Отправляет тестовое сообщение в тему группы для пары ticker x tf.
@@ -891,4 +892,3 @@ if __name__ == "__main__":
         'NGH6': ['15min'],
         'KCJ6': ['15min']
      })
-     

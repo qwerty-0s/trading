@@ -5,7 +5,7 @@ backtest.py — бэктест MorrisBot за последние N дней (п�
     python backtest.py
 
 Что делает:
-    1. Загружает данные за указанный период для всех пар ticker × tf.
+    1. Загружает данные за указанный период для всех пар ticker tf.
     2. Прогоняет каждую закрытую свечу через PatternDetector.
     3. Собирает статистику: всего сигналов, бычьих / медвежьих, по тикерам.
     4. Отправляет итоговый отчёт в Telegram (текст).
@@ -68,7 +68,7 @@ def run_backtest(
     send_per_signal: bool = False,   # True → отдельное фото на каждый сигнал
 ) -> List[BacktestSignal]:
     """
-    Запускает бэктест для всех пар ticker × tf за последние `days` дней.
+    Запускает бэктест для всех пар ticker tf за последние `days` дней.
 
     Параметры
     ----------
@@ -84,6 +84,7 @@ def run_backtest(
 
     bot = MorrisBot()
     all_signals: List[BacktestSignal] = []
+    df_cache: Dict[Tuple[str, str], "pd.DataFrame"] = {}
 
     print(f"\n{'='*60}")
     print(f"  BACKTEST  |  глубина: {days} дн.  |  {datetime.now():%d.%m.%Y %H:%M}")
@@ -115,6 +116,7 @@ def run_backtest(
             detector.config.indicator = NoIndicator()
 
             df = bot._prepare_df(df_raw, detector)
+            df_cache[(ticker, tf)] = df  # сохраняем для _send_summary
 
             # _prepare_df добавляет колонку индикатора; для NoIndicator
             # это "_no_indicator" с NaN — get_pattern_at_index это
@@ -190,7 +192,7 @@ def run_backtest(
     # ------------------------------------------------------------------
     # 2. Итоговый отчёт → Telegram
     # ------------------------------------------------------------------
-    _send_summary(bot, all_signals, days, send_screenshots)
+    _send_summary(bot, all_signals, days, send_screenshots, df_cache=df_cache)
 
     print(f"\n{'='*60}")
     print(f"  Итого сигналов: {len(all_signals)}")
@@ -216,8 +218,17 @@ def _send_summary(
     signals: List[BacktestSignal],
     days: int,
     send_screenshots: bool,
+    # df_cache хранит уже загруженные df чтобы не делать повторный fetch
+    df_cache: Dict[Tuple[str, str], "pd.DataFrame"] = None,
 ):
-    """Формирует и отправляет итоговый отчёт в Telegram."""
+    """Формирует и отправляет итоговый отчёт в Telegram.
+
+    Текст всегда идёт через sendMessage — у него нет лимита на длину
+    (Telegram принимает до 4096 символов).
+    Скриншот отправляется отдельным sendPhoto с короткой подписью (≤1024 символа).
+    Это разделение обязательно: sendPhoto caption ограничен 1024 символами,
+    и при превышении сервер обрывает соединение.
+    """
 
     total     = len(signals)
     bullish   = sum(1 for s in signals if s.is_bullish)
@@ -228,16 +239,15 @@ def _send_summary(
 
     lines = [
         f"📋 *Бэктест за {days} дн.* ({date_from} – {date_to})",
-        f"",
+        "",
         f"🔢 Всего сигналов:  *{total}*",
         f"🟢 Бычьих:  *{bullish}*   🔴 Медвежьих:  *{bearish}*",
-        f"",
+        "",
     ]
 
     if total == 0:
         lines.append("_Паттерны не обнаружены._")
     else:
-        # Группируем по тикеру
         by_ticker: Dict[str, List[BacktestSignal]] = {}
         for s in signals:
             by_ticker.setdefault(s.ticker, []).append(s)
@@ -265,29 +275,115 @@ def _send_summary(
     route_ticker = signals[0].ticker if signals else "SBER"
     route_tf     = signals[0].tf     if signals else "15min"
 
-    # Скриншот первого сигнала как «обложка» отчёта
-    img_path = None
+    # 1. Сводное сообщение — всегда текстом (sendMessage, лимит 4096 символов)
+    bot.router.send_message(route_ticker, route_tf, summary_text)
+
+    # 2. Скриншот первого сигнала — отдельным sendPhoto с короткой подписью
     if send_screenshots and signals:
         first = signals[0]
-        bot_tmp = MorrisBot()
-        detector = bot_tmp.get_detector(first.ticker)
-        df_raw = bot_tmp.fetch_data(first.ticker, first.tf, days=10)
-        if not df_raw.empty:
-            df = bot_tmp._prepare_df(df_raw, detector)
+
+        # Используем уже загруженный df если передан, иначе fetch
+        df = None
+        if df_cache and (first.ticker, first.tf) in df_cache:
+            df = df_cache[(first.ticker, first.tf)]
+        else:
+            df_raw = bot.fetch_data(first.ticker, first.tf, days=days + 1)
+            if not df_raw.empty:
+                detector = bot.get_detector(first.ticker)
+                detector.config.indicator = NoIndicator()
+                df = bot._prepare_df(df_raw, detector)
+
+        if df is not None:
             img_path = ChartVisualizer.create_screenshot(
                 df, first.ticker, first.tf,
                 first.pattern, first.candle_dt,
-                detector.config.indicator,
-                output_dir=bot_tmp.output_dir,
+                NoIndicator(),          # индикатор отключён и в бэктесте
+                output_dir=bot.output_dir,
             )
-
-    if img_path:
-        bot.router.send_photo(route_ticker, route_tf, summary_text, img_path)
-        os.remove(img_path)
-    else:
-        bot.router.send_message(route_ticker, route_tf, summary_text)
+            if img_path:
+                # Короткая подпись — caption не должен превышать 1024 символа
+                short_caption = (
+                    f"📊 *{first.ticker}* `{first.tf}` — {first.pattern}\n"
+                    f"🕐 `{_format_dt(first.candle_dt)}` @ `{first.price:.2f}`"
+                )
+                bot.router.send_photo(route_ticker, route_tf, short_caption, img_path)
+                os.remove(img_path)
 
     print("\n[Backtest] Итоговый отчёт отправлен в Telegram.")
+
+
+# ---------------------------------------------------------------------------
+# Минимальный smoke-тест: найти первый сигнал и отправить один скриншот
+# ---------------------------------------------------------------------------
+
+def send_first_signal(ticker: str = "SiM6", tf: str = "15min", days: int = 2):
+    """
+    Загружает данные, находит первый паттерн за последние `days` дней
+    и отправляет один sendPhoto в нужную тему.
+    Используй это чтобы убедиться что доставка работает, прежде чем
+    запускать полный run_backtest.
+    """
+    bot = MorrisBot()
+
+    print(f"▶ Загрузка {ticker} {tf} за {days} дн...")
+    df_raw = bot.fetch_data(ticker, tf, days=days + 1)
+    if df_raw.empty:
+        print("  ⚠ Нет данных")
+        return
+
+    detector = bot.get_detector(ticker)
+    detector.config.indicator = NoIndicator()
+    df = bot._prepare_df(df_raw, detector)
+
+    cutoff = datetime.now() - timedelta(days=days)
+    period_indices = df[df["datetime"] >= cutoff].index.tolist()[:-1]
+
+    # Ищем первый индекс с паттерном
+    first_sig = None
+    for pos in period_indices:
+        patterns = detector.get_pattern_at_index(df, pos)
+        if patterns:
+            row = df.loc[pos]
+            first_sig = (pos, patterns[0], row)
+            break
+
+    if first_sig is None:
+        print("  ⚠ Паттерны не найдены — попробуй увеличить days")
+        return
+
+    pos, pattern, row = first_sig
+    candle_dt = row["datetime"]
+    price     = row["close"]
+    is_bull   = _is_bullish(pattern)
+    icon      = "🟢" if is_bull else "🔴"
+
+    print(f"  {icon} Сигнал: {pattern} @ {_format_dt(candle_dt)}, цена {price:.2f}")
+    print(f"  Генерирую скриншот...")
+
+    img_path = ChartVisualizer.create_screenshot(
+        df, ticker, tf, pattern, candle_dt,
+        NoIndicator(), output_dir=bot.output_dir,
+    )
+
+    if img_path:
+        print(f"  Скриншот: {img_path}  ({os.path.getsize(img_path) // 1024} КБ)")
+    else:
+        print("  ⚠ Скриншот не создан — проверь kaleido/plotly")
+        return
+
+    caption = (
+        f"{icon} *{pattern}*\n"
+        f"📊 `{ticker}` | `{tf}`\n"
+        f"🕐 `{_format_dt(candle_dt)}` @ `{price:.2f}`"
+    )
+
+    print(f"  Отправляю sendPhoto в тему {ticker}_{tf.upper()}...")
+    bot.router.send_photo(ticker, tf, caption, img_path)
+
+    if os.path.exists(img_path):
+        os.remove(img_path)
+
+    print("  Готово.")
 
 
 # ---------------------------------------------------------------------------
@@ -296,17 +392,20 @@ def _send_summary(
 
 if __name__ == "__main__":
 
+    # --- Шаг 1: проверить доставку одного скриншота ---
+    #send_first_signal(ticker="SiM6", tf="15min", days=2)
+
+    #--- Шаг 2: когда доставка подтверждена — раскомментировать полный бэктест ---
     TICKERS_CONFIG = {
         "SiM6": ["15min"],
-        "BRJ6": ["15min"],
-        "CCH6": ["15min"],
-        "NGH6": ["15min"],
-        "KCJ6": ["15min"],
+         "BRJ6": ["15min"],
+         "CCH6": ["15min"],
+         "NGH6": ["15min"],
+         "KCJ6": ["15min"],
     }
-
     run_backtest(
-        config=TICKERS_CONFIG,
-        days=2,
-        send_screenshots=True,   # прикрепить скрин к итоговому сообщению
-        send_per_signal=True,   # True = отдельный алерт на каждый паттерн
+         config=TICKERS_CONFIG,
+         days=2,
+         send_screenshots=True,
+         send_per_signal=True,
     )

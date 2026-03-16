@@ -866,6 +866,23 @@ def test_telegram(ticker: str, tf: str):
     )
     router.send_message(ticker, tf, msg)
     print(f"Сообщение отправлено в тему thread_id={thread_id}")
+    
+def test_all_topics():
+    """Отправляет тестовое сообщение во все темы из .env"""
+    token    = os.getenv("TG_BOT_TOKEN", "")
+    group_id = os.getenv("TG_GROUP_ID", "")
+    router   = TelegramRouter(token, group_id)
+
+    if not router._topics:
+        print("Нет топиков в .env")
+        return
+
+    for key, thread_id in router._topics.items():
+        ticker, tf = key.split("_", 1)
+        tf = tf.lower()
+        msg = f"✅ *MorrisBot запущен*\n`{ticker}` | `{tf}` | thread\\_id: `{thread_id}`"
+        router.send_message(ticker, tf, msg)
+        print(f"Отправлено: {key} → thread_id={thread_id}")
 # ==============================================================================
 # ТОЧКА ВХОДА
 # ==============================================================================
@@ -883,7 +900,8 @@ if __name__ == "__main__":
     # visual_backtest('VTBR', '15min', 10, indicator=StochasticIndicator())
     
     #test_telegram('BRH6', '15min')
-
+    test_all_topics()
+    
     bot = MorrisBot()
     bot.run({
         'SiM6': ['15min'],

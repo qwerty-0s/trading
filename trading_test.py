@@ -900,13 +900,13 @@ if __name__ == "__main__":
     # visual_backtest('VTBR', '15min', 10, indicator=StochasticIndicator())
     
     #test_telegram('BRH6', '15min')
-    test_all_topics()
+    #test_all_topics()
     
     bot = MorrisBot()
     bot.run({
-        'SiM6': ['15min'],
-        'BRJ6': ['15min'],
-        'CCH6': ['15min'],
-        'NGH6': ['15min'],
-        'KCJ6': ['15min']
-     })
+    'SiM6':  ['15min'],
+    'BRJ6':  ['15min'],
+    'CCJ6':  ['15min'],
+    'NGJ6':  ['15min'],
+    'KCJ6':  ['15min']
+    })

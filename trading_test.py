@@ -890,7 +890,7 @@ def test_all_topics():
 if __name__ == "__main__":
 
     # --- Бэктест БЕЗ индикатора (только паттерны + EMA10) ---
-    #visual_backtest('CCH6', '30min', 5, indicator=NoIndicator())
+    #visual_backtest('BRJ6', '15min', 2, indicator=NoIndicator())
 
     # --- Бэктест с RSI (по умолчанию если не передавать indicator) ---
     # visual_backtest('SBER', '15min', 10)
@@ -900,13 +900,13 @@ if __name__ == "__main__":
     # visual_backtest('VTBR', '15min', 10, indicator=StochasticIndicator())
     
     #test_telegram('BRH6', '15min')
-    test_all_topics()
+    #test_all_topics()
     
     bot = MorrisBot()
     bot.run({
-    'SiM6':  ['15min'],
-    'BRJ6':  ['15min'],
-    'CCJ6':  ['15min'],
-    'NGJ6':  ['15min'],
-    'KCJ6':  ['15min']
+    'SiM6':  ['15min','30min'],
+    'BRJ6':  ['15min','30min'],
+    'CCJ6':  ['15min','30min'],
+    'NGJ6':  ['15min','30min'],
+    'KCJ6':  ['15min','30min']
     })

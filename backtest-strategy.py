@@ -667,12 +667,12 @@ if __name__ == '__main__':
 
     # ── Dual: BB%B + Adaptive MFI (по умолчанию) ──────────────────────────
     visual_backtest_dual(
-        ticker='NGJ6',
+        ticker='SBER',
         tf='15min',
-        days=30,
+        days=12,
         indicator=AdaptiveMFIIndicator(),
         forward_candles=10,
-        min_move_pct=0.5,
+        min_move_pct=0.1,
         cooldown_candles=3,   # не повторять тот же паттерн в пределах 3 свечей
         show_all=False,
     )

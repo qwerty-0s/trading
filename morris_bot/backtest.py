@@ -185,7 +185,8 @@ def run_backtest(ticker: str,
                  indicator: BaseIndicator = None,
                  forward_candles: int = 10,
                  min_move_pct: float = 0.3,
-                 cooldown_candles: int = 0) -> Tuple[pd.DataFrame, pd.DataFrame]:
+                 cooldown_candles: int = 0,
+                 use_pattern_confirmation: bool = False) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Статистический бэктест с одним индикатором (может быть DualConfirmIndicator).
 
@@ -209,6 +210,8 @@ def run_backtest(ticker: str,
     print(f"Горизонт  : {forward_candles} свечей | мин. движение: {min_move_pct}%")
     if cooldown_candles:
         print(f"Cooldown  : {cooldown_candles} свечей")
+    if use_pattern_confirmation:
+        print("Подтв. паттерна: включено (+1 свеча)")
     print('='*60)
 
     df_raw = _fetch_data(ticker, tf, days)
@@ -229,7 +232,15 @@ def run_backtest(ticker: str,
         if not all_patterns:
             continue
 
-        confirmed_set = set(with_filter.get_pattern_at_index(df, i))
+        # Фильтр 1: индикатор
+        ind_confirmed = set(with_filter.get_pattern_at_index(df, i))
+
+        # Фильтр 2 (опц.): подтверждение следующей свечой
+        if use_pattern_confirmation and i + 1 < len(df):
+            confirmed_set = set(filter_confirmed(list(ind_confirmed), df, i))
+        else:
+            confirmed_set = ind_confirmed
+
         row           = df.iloc[i]
         entry_price   = float(row['close'])
         future        = df.iloc[i + 1: i + 1 + forward_candles]

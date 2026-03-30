@@ -7,63 +7,80 @@ from morris_bot.backtest import (
     visual_backtest, visual_backtest_dual, run_backtest,
     test_telegram, test_all_topics,
 )
+from morris_bot.strategy_test import (
+    StrategyParams, run_strategy_backtest,
+    visual_strategy_backtest, compare_strategies,
+)
+
 
 
 if __name__ == "__main__":
 
-    #── Быстрый визуальный просмотр (без статистики) ──────────────────────
-    #visual_backtest('NGJ6', '15min', 2, indicator=NoIndicator(), use_confirmation=True)
+    # ── Быстрый визуальный просмотр (без статистики) ──────────────────────
+    # visual_backtest('BRJ6', '15min', 2, indicator=NoIndicator())
 
-    #── Полный бэктест: Dual BB%B + AI MFI (по умолчанию) ─────────────────
-    visual_backtest_dual(
+    # ── Статистический бэктест (с подтверждением паттернов) ───────────────
+    # run_backtest('SBER', '15min', days=20,
+    #              indicator=RSIIndicator(14),
+    #              use_pattern_confirmation=True,
+    #              forward_candles=10,
+    #              min_move_pct=0.2)
+
+    # ── Стратегический бэктест: SL на экстремуме, TP на EMA10 ─────────────
+    # ── 1. Базовый запуск: фикс. 1.5R, без фильтров ──────────────────────
+    """params_base = StrategyParams(
+        tp_mode='atr',
+        rr_multiplier=1.5,
+        sl_mode='lookback',
+        sl_lookback=5,
+        max_candles=20,
+        use_indicator=True,
+        use_pattern_confirmation=True,
+        min_rr=0.0,             # без фильтра R:R — видим все сделки
+        trailing_stop=True,
+        partial_take=True,
+    )
+ 
+    visual_strategy_backtest(
         ticker='NGJ6',
         tf='15min',
-        days=12,
-        forward_candles=10,
-        min_move_pct=0.4,
-        cooldown_candles=3,
-        show_all=False,
-        indicator=AdaptiveMFIIndicator()
-    )
+        days=30,
+        indicator=AdaptiveMFIIndicator(),
+        params=params_base,
+    )"""
 
-    # ── Бэктест с одним индикатором ────────────────────────────────────────
-    # visual_backtest_dual('SBER', '15min', days=20,
-    #                      indicator=RSIIndicator(14, oversold=30, overbought=70))
+    # ── Dual-индикатор ─────────────────────────────────────────────────────
+    # dual = DualConfirmIndicator(BollingerPercentBIndicator(), AdaptiveMFIIndicator())
+    # visual_strategy_backtest('NGJ6', '15min', days=40,
+    #                           indicator=dual, params=params)
 
-    # ── Только статистика (без графика) ───────────────────────────────────
-    # signals_df, stats_df = run_backtest(
-    #     ticker='SBER', tf='1h', days=60,
-    #     indicator=DualConfirmIndicator(
-    #         BollingerPercentBIndicator(),
-    #         AdaptiveMFIIndicator(),
-    #     ),
-    #     forward_candles=10,
-    #     min_move_pct=0.5,
-    #     cooldown_candles=5,
-    # )
-
-    # ── Сравнение нескольких индикаторов ──────────────────────────────────
-    # for label, ind in [
-    #     ('No filter', NoIndicator()),
-    #     ('RSI',       RSIIndicator()),
-    #     ('BB%B',      BollingerPercentBIndicator()),
-    #     ('AI MFI',    AdaptiveMFIIndicator()),
-    #     ('Dual',      DualConfirmIndicator(BollingerPercentBIndicator(),
-    #                                        AdaptiveMFIIndicator())),
-    # ]:
-    #     print(f'\n>>> {label}')
-    #     run_backtest('NGJ6', '15min', 30, ind, forward_candles=10)
-
-    # ── Тест Telegram ──────────────────────────────────────────────────────
-    # test_telegram('BRH6', '15min')
-    # test_all_topics()
+    # ── Сравнение конфигураций ─────────────────────────────────────────────
+    # compare_strategies('SBER', '15min', days=30, configs={
+    #     'NoFilter': (NoIndicator(),   StrategyParams(sl_lookback=5)),
+    #     'RSI':      (RSIIndicator(),  StrategyParams(sl_lookback=5)),
+    #     'BB%B':     (BollingerPercentBIndicator(), StrategyParams(sl_lookback=7)),
+    #     'Dual':     (DualConfirmIndicator(BollingerPercentBIndicator(),
+    #                                       AdaptiveMFIIndicator()),
+    #                  StrategyParams(sl_lookback=7, max_candles=25)),
+    # })
 
     # ── Запуск бота ────────────────────────────────────────────────────────
     # bot = MorrisBot()
-    # bot.run({
-    #     'SiM6':  ['15min'],
-    #     'BRJ6':  ['15min'],
-    #     'CCJ6':  ['15min'],
-    #     'NGJ6':  ['15min'],
-    #     'KCJ6':  ['15min'],
-    # })
+    # bot.run(
+    #     config={'SiM6': ['15min'], 'BRJ6': ['15min'], 'NGJ6': ['15min']},
+    #     indicators={'SiM6': RSIIndicator(14), 'BRJ6': RSIIndicator(14)},
+    # )
+    
+    test_all_topics()
+    
+    """
+    bot = MorrisBot()
+    bot.run(config={
+    'SiM6':  ['15min','30min'],
+    'BRJ6':  ['15min','30min'],
+    'CCJ6':  ['15min','30min'],
+    'NGJ6':  ['15min','30min'],
+    'KCJ6':  ['15min','30min']
+    }            
+    )
+    """

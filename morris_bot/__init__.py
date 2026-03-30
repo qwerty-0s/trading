@@ -21,3 +21,11 @@ __all__ = [
     "visual_backtest", "visual_backtest_dual", "run_backtest",
     "test_telegram", "test_all_topics",
 ]
+
+from morris_bot.strategy_test import (
+    StrategyParams,
+    Trade,
+    run_strategy_backtest,
+    visual_strategy_backtest,
+    compare_strategies,
+)

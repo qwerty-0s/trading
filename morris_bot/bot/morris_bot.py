@@ -10,8 +10,10 @@ from moexalgo import Ticker
 
 from morris_bot.config import ScannerConfig
 from morris_bot.indicators import RSIIndicator, MACDIndicator, NoIndicator
+from morris_bot.indicators.base import BaseIndicator
+from morris_bot.indicators.dual import DualConfirmIndicator
 from morris_bot.patterns.detector import PatternDetector
-from morris_bot.patterns.confirmation import filter_confirmed
+from morris_bot.patterns.confirmation import filter_confirmed, needs_confirmation
 from morris_bot.visualization.chart import ChartVisualizer
 from morris_bot.bot.router import TelegramRouter
 
@@ -32,10 +34,20 @@ class MorrisBot:
 
         os.makedirs(output_dir, exist_ok=True)
 
-    def get_detector(self, ticker: str) -> PatternDetector:
-        """Создаёт детектор с индивидуальными настройками для тикера."""
+    def get_detector(self, ticker: str,
+                     indicator: BaseIndicator = None) -> PatternDetector:
+        """
+        Создаёт детектор для тикера.
+
+        Приоритет:
+          1. indicator — явно переданный (из run() или вызова напрямую)
+          2. Встроенные дефолты по тикеру (SBER → RSI, GAZP → MACD)
+          3. NoIndicator — если ничего не задано
+        """
         if ticker not in self.detectors:
-            if "SBER" in ticker:
+            if indicator is not None:
+                config = ScannerConfig(indicator=indicator)
+            elif "SBER" in ticker:
                 config = ScannerConfig(
                     long_body_coeff=1.4,
                     indicator=RSIIndicator(period=14, oversold=35, overbought=65)
@@ -45,10 +57,35 @@ class MorrisBot:
                     indicator=MACDIndicator(fast=12, slow=26, signal=9)
                 )
             else:
-                config = ScannerConfig()
+                config = ScannerConfig()  # AdaptiveMFIIndicator по умолчанию
 
             self.detectors[ticker] = PatternDetector(config)
         return self.detectors[ticker]
+
+    def _format_ind_str(self, detector: PatternDetector, df: pd.DataFrame, idx: int) -> str:
+        """Форматирует строку со значением индикатора для Telegram-сообщения."""
+        ind     = detector.config.indicator
+        ind_col = ind.column_name
+
+        if isinstance(ind, NoIndicator) or ind_col not in df.columns:
+            return ""
+
+        # DualConfirmIndicator хранит bit-encoded число — показываем sub-индикаторы
+        if isinstance(ind, DualConfirmIndicator):
+            parts = []
+            for sub in (ind.ind1, ind.ind2):
+                sub_col = sub.column_name
+                if sub_col in df.columns:
+                    v = df.loc[idx, sub_col]
+                    if pd.notna(v):
+                        parts.append(f"{sub.plot_label}: `{v:.1f}`")
+            return ("\n📈 " + " | ".join(parts)) if parts else ""
+
+        # Обычный индикатор
+        v = df.loc[idx, ind_col]
+        if pd.isna(v):
+            return ""
+        return f"\n📈 {ind.plot_label}: `{v:.1f}`"
 
     def _prepare_df(self, df: pd.DataFrame, detector: PatternDetector) -> pd.DataFrame:
         from morris_bot.indicators.dual import DualConfirmIndicator
@@ -78,7 +115,7 @@ class MorrisBot:
         '1d':    3600,
     }
 
-    def _worker(self, ticker: str, tf: str):
+    def _worker(self, ticker: str, tf: str, indicator: BaseIndicator = None):
         """Воркер для одной пары ticker × tf. Работает в отдельном потоке."""
         sleep_sec    = self.TF_SLEEP.get(tf, 60)
         last_signals: Dict[str, datetime] = {}
@@ -91,18 +128,15 @@ class MorrisBot:
                 if df_raw.empty:
                     print(f"[Worker] Нет данных: {ticker} {tf}")
                 else:
-                    detector = self.get_detector(ticker)
+                    detector = self.get_detector(ticker, indicator)
                     df       = self._prepare_df(df_raw, detector)
 
-                    # Ищем паттерны на предпоследней закрытой свече,
-                    # чтобы последняя закрытая ([last_idx]) была подтверждающей.
+                    # Паттерн ищем на [-3], свеча [-2] — подтверждающая
                     pattern_idx = len(df) - 3
                     last_idx    = len(df) - 2
 
                     raw_patterns = detector.get_pattern_at_index(df, pattern_idx)
-
-                    # filter_confirmed использует df.iloc[pattern_idx + 1] как confirm
-                    patterns = filter_confirmed(raw_patterns, df, pattern_idx)
+                    patterns     = filter_confirmed(raw_patterns, df, pattern_idx)
 
                     for pattern in patterns:
                         sig_key = f"{ticker}_{tf}_{pattern}"
@@ -117,19 +151,11 @@ class MorrisBot:
                             output_dir=self.output_dir
                         )
 
-                        is_bullish = any(x in pattern.lower() for x in
-                                         ['bull', 'hammer', 'morning', 'soldier', 'piercing'])
+                        is_bullish      = any(x in pattern.lower() for x in
+                                              ['bull', 'hammer', 'morning', 'soldier', 'piercing'])
                         direction_emoji = "🟢" if is_bullish else "🔴"
-                        ind_col   = detector.config.indicator.column_name
-                        ind_value = df.loc[last_idx, ind_col] if ind_col in df.columns else None
-                        ind_str   = (
-                            f"\n📈 {detector.config.indicator.plot_label}: `{ind_value:.1f}`"
-                            if ind_value and not pd.isna(ind_value) else ""
-                        )
-
-                        # Добавляем пометку ✅ если паттерн прошёл подтверждение
-                        from morris_bot.patterns.confirmation import needs_confirmation
-                        confirmed_mark = " ✅" if needs_confirmation(pattern) else ""
+                        confirmed_mark  = " ✅" if needs_confirmation(pattern) else ""
+                        ind_str         = self._format_ind_str(detector, df, last_idx)
 
                         msg = (
                             f"{direction_emoji} *{pattern}*{confirmed_mark}\n"
@@ -151,22 +177,41 @@ class MorrisBot:
 
             time.sleep(sleep_sec)
 
-    def run(self, config: Dict[str, List[str]]):
+    def run(self, config: Dict[str, List[str]],
+            indicators: Dict[str, BaseIndicator] = None):
         """
         Запускает отдельный поток для каждой пары ticker × tf.
 
-        Пример:
-            bot.run({
-                'SBER': ['15min', '1h'],
-                'GAZP': ['15min', '1h'],
-            })
+        Args:
+            config:     {ticker: [tf, ...]}
+            indicators: {ticker: BaseIndicator} — опциональный индикатор на тикер.
+                        Если не задан — используются встроенные дефолты (SBER→RSI, GAZP→MACD)
+                        или NoIndicator для остальных.
+
+        Примеры:
+            # Дефолты — SBER получит RSI, остальные NoIndicator
+            bot.run({'SBER': ['15min'], 'BRJ6': ['15min']})
+
+            # Явные индикаторы
+            from morris_bot.indicators import DualConfirmIndicator, BollingerPercentBIndicator, AdaptiveMFIIndicator
+            dual = DualConfirmIndicator(BollingerPercentBIndicator(), AdaptiveMFIIndicator())
+            bot.run(
+                {'SiM6': ['15min'], 'BRJ6': ['15min'], 'NGJ6': ['15min']},
+                indicators={
+                    'SiM6': dual,
+                    'BRJ6': dual,
+                    'NGJ6': RSIIndicator(14),
+                }
+            )
         """
+        indicators = indicators or {}
         threads = []
         for ticker, timeframes in config.items():
+            ind = indicators.get(ticker)  # None → get_detector использует дефолт
             for tf in timeframes:
                 t = threading.Thread(
                     target=self._worker,
-                    args=(ticker, tf),
+                    args=(ticker, tf, ind),
                     name=f"{ticker}_{tf}",
                     daemon=True
                 )

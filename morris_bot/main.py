@@ -71,9 +71,9 @@ if __name__ == "__main__":
     #     indicators={'SiM6': RSIIndicator(14), 'BRJ6': RSIIndicator(14)},
     # )
     
-    test_all_topics()
+    #test_all_topics()
     
-    """
+    
     bot = MorrisBot()
     bot.run(config={
     'SiM6':  ['15min','30min'],
@@ -83,4 +83,4 @@ if __name__ == "__main__":
     'KCJ6':  ['15min','30min']
     }            
     )
-    """
+    

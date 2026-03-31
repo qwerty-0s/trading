@@ -13,7 +13,6 @@ from morris_bot.strategy_test import (
 )
 
 
-
 if __name__ == "__main__":
 
     # ── Быстрый визуальный просмотр (без статистики) ──────────────────────
@@ -27,26 +26,19 @@ if __name__ == "__main__":
     #              min_move_pct=0.2)
 
     # ── Стратегический бэктест: SL на экстремуме, TP на EMA10 ─────────────
-    # ── 1. Базовый запуск: фикс. 1.5R, без фильтров ──────────────────────
-    """params_base = StrategyParams(
-        tp_mode='atr',
-        rr_multiplier=1.5,
-        sl_mode='lookback',
+    """params = StrategyParams(
         sl_lookback=5,
         max_candles=20,
-        use_indicator=True,
         use_pattern_confirmation=True,
-        min_rr=0.0,             # без фильтра R:R — видим все сделки
-        trailing_stop=True,
-        partial_take=True,
+        simultaneous_hit='sl_first',
     )
- 
+
     visual_strategy_backtest(
-        ticker='NGJ6',
+        ticker='SBER',
         tf='15min',
         days=30,
-        indicator=AdaptiveMFIIndicator(),
-        params=params_base,
+        indicator=RSIIndicator(14, oversold=35, overbought=65),
+        params=params,
     )"""
 
     # ── Dual-индикатор ─────────────────────────────────────────────────────
@@ -71,16 +63,15 @@ if __name__ == "__main__":
     #     indicators={'SiM6': RSIIndicator(14), 'BRJ6': RSIIndicator(14)},
     # )
     
-    #test_all_topics()
-    
-    
     bot = MorrisBot()
-    bot.run(config={
-    'SiM6':  ['15min','30min'],
-    'BRJ6':  ['15min','30min'],
-    'CCJ6':  ['15min','30min'],
-    'NGJ6':  ['15min','30min'],
-    'KCJ6':  ['15min','30min']
-    }            
+
+    bot.run(
+    config={
+        'SiM6': ['15min', '30min'],
+        'BRJ6': ['15min', '30min'],
+        'CCJ6': ['15min', '30min'],
+        'NGJ6': ['15min', '30min'],
+        'KCJ6': ['15min', '30min'],
+    },
+    indicators={ticker: AdaptiveMFIIndicator() for ticker in ['SiM6', 'BRJ6', 'CCJ6', 'NGJ6', 'KCJ6']},
     )
-    

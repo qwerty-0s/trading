@@ -1,3 +1,4 @@
+import copy
 import os
 import time
 import threading
@@ -13,7 +14,7 @@ from morris_bot.indicators import RSIIndicator, MACDIndicator, NoIndicator
 from morris_bot.indicators.base import BaseIndicator
 from morris_bot.indicators.dual import DualConfirmIndicator
 from morris_bot.patterns.detector import PatternDetector
-from morris_bot.patterns.confirmation import filter_confirmed, needs_confirmation
+# filter_confirmed используется только в backtest, не в боте
 from morris_bot.visualization.chart import ChartVisualizer
 from morris_bot.bot.router import TelegramRouter
 
@@ -34,17 +35,20 @@ class MorrisBot:
 
         os.makedirs(output_dir, exist_ok=True)
 
-    def get_detector(self, ticker: str,
+    def get_detector(self, ticker: str, tf: str = '',
                      indicator: BaseIndicator = None) -> PatternDetector:
         """
-        Создаёт детектор для тикера.
+        Создаёт детектор для пары ticker × tf.
+        Ключ включает tf, чтобы два таймфрейма одного тикера
+        не делили один объект индикатора (защита от Race Condition).
 
         Приоритет:
           1. indicator — явно переданный (из run() или вызова напрямую)
           2. Встроенные дефолты по тикеру (SBER → RSI, GAZP → MACD)
           3. NoIndicator — если ничего не задано
         """
-        if ticker not in self.detectors:
+        key = f"{ticker}_{tf}" if tf else ticker
+        if key not in self.detectors:
             if indicator is not None:
                 config = ScannerConfig(indicator=indicator)
             elif "SBER" in ticker:
@@ -57,10 +61,10 @@ class MorrisBot:
                     indicator=MACDIndicator(fast=12, slow=26, signal=9)
                 )
             else:
-                config = ScannerConfig()  # AdaptiveMFIIndicator по умолчанию
+                config = ScannerConfig()  # NoIndicator по умолчанию
 
-            self.detectors[ticker] = PatternDetector(config)
-        return self.detectors[ticker]
+            self.detectors[key] = PatternDetector(config)
+        return self.detectors[key]
 
     def _format_ind_str(self, detector: PatternDetector, df: pd.DataFrame, idx: int) -> str:
         """Форматирует строку со значением индикатора для Telegram-сообщения."""
@@ -105,22 +109,43 @@ class MorrisBot:
 
         return df.reset_index(drop=True)
 
-    TF_SLEEP: Dict[str, int] = {
-        '1min':  30,
-        '5min':  60,
-        '15min': 60,
-        '30min': 120,
-        '1h':    300,
-        '4h':    900,
-        '1d':    3600,
+    TF_SECONDS: Dict[str, int] = {
+        '1min':  60,
+        '5min':  300,
+        '15min': 900,
+        '30min': 1800,
+        '1h':    3600,
+        '4h':    14400,
+        '1d':    86400,
     }
+
+    TF_CLOSE_BUFFER: Dict[str, int] = {
+        '1min':  5,
+        '5min':  10,
+        '15min': 15,
+        '30min': 20,
+        '1h':    30,
+        '4h':    60,
+        '1d':    120,
+    }
+
+    @staticmethod
+    def _sleep_until_next_candle_close(tf: str, tf_seconds: int, close_buffer: int):
+        now = datetime.now()
+        # Секунды с начала суток — корректно для любого таймфрейма (1min..1d)
+        day_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        elapsed     = day_seconds % tf_seconds
+        wait        = tf_seconds - elapsed + close_buffer
+        time.sleep(wait)
+
 
     def _worker(self, ticker: str, tf: str, indicator: BaseIndicator = None):
         """Воркер для одной пары ticker × tf. Работает в отдельном потоке."""
-        sleep_sec    = self.TF_SLEEP.get(tf, 60)
+        tf_seconds   = self.TF_SECONDS.get(tf, 60)
+        close_buffer = self.TF_CLOSE_BUFFER.get(tf, 15)
         last_signals: Dict[str, datetime] = {}
 
-        print(f"[Worker] Запуск: {ticker} | {tf} | интервал {sleep_sec}с")
+        print(f"[Worker] Запуск: {ticker} | {tf} | буфер {close_buffer}с после закрытия")
 
         while True:
             try:
@@ -128,15 +153,18 @@ class MorrisBot:
                 if df_raw.empty:
                     print(f"[Worker] Нет данных: {ticker} {tf}")
                 else:
-                    detector = self.get_detector(ticker, indicator)
+                    detector = self.get_detector(ticker, tf, indicator)
                     df       = self._prepare_df(df_raw, detector)
 
-                    # Паттерн ищем на [-3], свеча [-2] — подтверждающая
-                    pattern_idx = len(df) - 3
+                    # len(df)-1 может быть формирующейся свечой — берём len(df)-2
+                    # как последнюю гарантированно закрытую.
+                    # filter_confirmed НЕ используется в боте: он ждёт следующей
+                    # закрытой свечи и добавляет 1 полный таймфрейм задержки (30+ мин).
+                    # Фильтр индикатора уже встроен в detector через ScannerConfig.
+                    pattern_idx = len(df) - 2
                     last_idx    = len(df) - 2
 
-                    raw_patterns = detector.get_pattern_at_index(df, pattern_idx)
-                    patterns     = filter_confirmed(raw_patterns, df, pattern_idx)
+                    patterns = detector.get_pattern_at_index(df, pattern_idx)
 
                     for pattern in patterns:
                         sig_key = f"{ticker}_{tf}_{pattern}"
@@ -154,11 +182,10 @@ class MorrisBot:
                         is_bullish      = any(x in pattern.lower() for x in
                                               ['bull', 'hammer', 'morning', 'soldier', 'piercing'])
                         direction_emoji = "🟢" if is_bullish else "🔴"
-                        confirmed_mark  = " ✅" if needs_confirmation(pattern) else ""
-                        ind_str         = self._format_ind_str(detector, df, last_idx)
+                        ind_str = self._format_ind_str(detector, df, last_idx)
 
                         msg = (
-                            f"{direction_emoji} *{pattern}*{confirmed_mark}\n"
+                            f"{direction_emoji} *{pattern}*\n"
                             f"📊 `{ticker}` | `{tf}`\n"
                             f"💰 Цена: `{df.loc[last_idx, 'close']}`"
                             f"{ind_str}"
@@ -175,7 +202,7 @@ class MorrisBot:
             except Exception as e:
                 print(f"[Worker] Ошибка {ticker} {tf}: {e}")
 
-            time.sleep(sleep_sec)
+            self._sleep_until_next_candle_close(tf, tf_seconds, close_buffer)
 
     def run(self, config: Dict[str, List[str]],
             indicators: Dict[str, BaseIndicator] = None):
@@ -207,8 +234,12 @@ class MorrisBot:
         indicators = indicators or {}
         threads = []
         for ticker, timeframes in config.items():
-            ind = indicators.get(ticker)  # None → get_detector использует дефолт
             for tf in timeframes:
+                # Каждый поток получает глубокую копию индикатора
+                # чтобы избежать Race Condition при параллельном compute().
+                # deepcopy корректно копирует DualConfirmIndicator с sub-объектами.
+                ind_factory = indicators.get(ticker)
+                ind = copy.deepcopy(ind_factory) if ind_factory else None
                 t = threading.Thread(
                     target=self._worker,
                     args=(ticker, tf, ind),

@@ -109,43 +109,23 @@ class MorrisBot:
 
         return df.reset_index(drop=True)
 
-    TF_SECONDS: Dict[str, int] = {
-        '1min':  60,
-        '5min':  300,
-        '15min': 900,
-        '30min': 1800,
-        '1h':    3600,
-        '4h':    14400,
-        '1d':    86400,
+    TF_SLEEP: Dict[str, int] = {
+        '1min':  30,
+        '5min':  60,
+        '15min': 60,
+        '30min': 120,
+        '1h':    300,
+        '4h':    900,
+        '1d':    3600,
     }
-
-    TF_CLOSE_BUFFER: Dict[str, int] = {
-        '1min':  5,
-        '5min':  10,
-        '15min': 15,
-        '30min': 20,
-        '1h':    30,
-        '4h':    60,
-        '1d':    120,
-    }
-
-    @staticmethod
-    def _sleep_until_next_candle_close(tf: str, tf_seconds: int, close_buffer: int):
-        now = datetime.now()
-        # Секунды с начала суток — корректно для любого таймфрейма (1min..1d)
-        day_seconds = now.hour * 3600 + now.minute * 60 + now.second
-        elapsed     = day_seconds % tf_seconds
-        wait        = tf_seconds - elapsed + close_buffer
-        time.sleep(wait)
 
 
     def _worker(self, ticker: str, tf: str, indicator: BaseIndicator = None):
         """Воркер для одной пары ticker × tf. Работает в отдельном потоке."""
-        tf_seconds   = self.TF_SECONDS.get(tf, 60)
-        close_buffer = self.TF_CLOSE_BUFFER.get(tf, 15)
+        sleep_sec    = self.TF_SLEEP.get(tf, 60)
         last_signals: Dict[str, datetime] = {}
 
-        print(f"[Worker] Запуск: {ticker} | {tf} | буфер {close_buffer}с после закрытия")
+        print(f"[Worker] Запуск: {ticker} | {tf} | интервал {sleep_sec}с")
 
         while True:
             try:
@@ -202,7 +182,7 @@ class MorrisBot:
             except Exception as e:
                 print(f"[Worker] Ошибка {ticker} {tf}: {e}")
 
-            self._sleep_until_next_candle_close(tf, tf_seconds, close_buffer)
+            time.sleep(sleep_sec)
 
     def run(self, config: Dict[str, List[str]],
             indicators: Dict[str, BaseIndicator] = None):

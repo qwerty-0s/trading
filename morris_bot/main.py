@@ -63,15 +63,19 @@ if __name__ == "__main__":
     #     indicators={'SiM6': RSIIndicator(14), 'BRJ6': RSIIndicator(14)},
     # )
     
+    #test_all_topics()
+    
     bot = MorrisBot()
 
     bot.run(
     config={
         'SiM6': ['15min', '30min'],
-        'BRJ6': ['15min', '30min'],
+        'BRK6': ['15min', '30min'],
         'CCJ6': ['15min', '30min'],
-        'NGJ6': ['15min', '30min'],
+        'NGK6': ['15min', '30min'],
         'KCJ6': ['15min', '30min'],
+        'GDM6': ['15min', '30min'],
+        'SVM6': ['15min', '30min'],
     },
-    indicators={ticker: AdaptiveMFIIndicator() for ticker in ['SiM6', 'BRJ6', 'CCJ6', 'NGJ6', 'KCJ6']},
+    indicators={ticker: AdaptiveMFIIndicator() for ticker in ['SiM6', 'BRK6', 'CCJ6', 'NGK6', 'KCJ6', 'GDM6', 'SVM6']},
     )

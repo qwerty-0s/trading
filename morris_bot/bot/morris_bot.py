@@ -1,7 +1,6 @@
+import asyncio
 import copy
 import os
-import time
-import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -31,12 +30,18 @@ class MorrisBot:
 
         self.router     = TelegramRouter(token, chat_id)
         self.detectors: Dict[str, PatternDetector] = {}
+        # Лок нужен только для инициализации детектора — потом читаем без блокировки.
+        self._detectors_lock = asyncio.Lock()
         self.output_dir = output_dir
 
         os.makedirs(output_dir, exist_ok=True)
 
-    def get_detector(self, ticker: str, tf: str = '',
-                     indicator: BaseIndicator = None) -> PatternDetector:
+    # ------------------------------------------------------------------
+    # Детекторы
+    # ------------------------------------------------------------------
+
+    async def get_detector(self, ticker: str, tf: str = '',
+                           indicator: BaseIndicator = None) -> PatternDetector:
         """
         Создаёт детектор для пары ticker × tf.
         Ключ включает tf, чтобы два таймфрейма одного тикера
@@ -48,7 +53,16 @@ class MorrisBot:
           3. NoIndicator — если ничего не задано
         """
         key = f"{ticker}_{tf}" if tf else ticker
-        if key not in self.detectors:
+
+        # Быстрый путь без лока — детектор уже создан
+        if key in self.detectors:
+            return self.detectors[key]
+
+        # Медленный путь — создаём под локом, чтобы не дублировать объект
+        async with self._detectors_lock:
+            if key in self.detectors:          # повторная проверка после захвата лока
+                return self.detectors[key]
+
             if indicator is not None:
                 config = ScannerConfig(indicator=indicator)
             elif "SBER" in ticker:
@@ -61,10 +75,15 @@ class MorrisBot:
                     indicator=MACDIndicator(fast=12, slow=26, signal=9)
                 )
             else:
-                config = ScannerConfig()  # NoIndicator по умолчанию
+                config = ScannerConfig()       # NoIndicator по умолчанию
 
             self.detectors[key] = PatternDetector(config)
+
         return self.detectors[key]
+
+    # ------------------------------------------------------------------
+    # Форматирование
+    # ------------------------------------------------------------------
 
     def _format_ind_str(self, detector: PatternDetector, df: pd.DataFrame, idx: int) -> str:
         """Форматирует строку со значением индикатора для Telegram-сообщения."""
@@ -91,9 +110,16 @@ class MorrisBot:
             return ""
         return f"\n📈 {ind.plot_label}: `{v:.1f}`"
 
-    def _prepare_df(self, df: pd.DataFrame, detector: PatternDetector) -> pd.DataFrame:
-        from morris_bot.indicators.dual import DualConfirmIndicator
+    # ------------------------------------------------------------------
+    # Подготовка данных (CPU-bound → выполняется в thread-pool)
+    # ------------------------------------------------------------------
 
+    @staticmethod
+    def _prepare_df_sync(df: pd.DataFrame, detector: PatternDetector) -> pd.DataFrame:
+        """
+        Синхронная версия подготовки DataFrame.
+        Вызывается через asyncio.to_thread, чтобы не блокировать event loop.
+        """
         df = df.copy()
         df['datetime'] = pd.to_datetime(df['begin'])
         df['ema10']    = df['close'].ewm(span=10, adjust=False).mean()
@@ -101,13 +127,15 @@ class MorrisBot:
         ind = detector.config.indicator
         df[ind.column_name] = ind.compute(df)
 
-        # Для DualConfirmIndicator дополнительно записываем колонки sub-индикаторов
-        # — нужны для панелей визуализации в visual_backtest_dual
         if isinstance(ind, DualConfirmIndicator):
             df[ind.ind1.column_name] = ind.ind1.compute(df)
             df[ind.ind2.column_name] = ind.ind2.compute(df)
 
         return df.reset_index(drop=True)
+
+    # ------------------------------------------------------------------
+    # Таймауты опроса
+    # ------------------------------------------------------------------
 
     TF_SLEEP: Dict[str, int] = {
         '1min':  30,
@@ -119,9 +147,18 @@ class MorrisBot:
         '1d':    3600,
     }
 
+    # ------------------------------------------------------------------
+    # Воркер (async-корутина вместо потока)
+    # ------------------------------------------------------------------
 
-    def _worker(self, ticker: str, tf: str, indicator: BaseIndicator = None):
-        """Воркер для одной пары ticker × tf. Работает в отдельном потоке."""
+    async def _worker(self, ticker: str, tf: str, indicator: BaseIndicator = None):
+        """
+        Асинхронный воркер для одной пары ticker × tf.
+
+        Вся блокирующая работа (сеть, диск, pandas) уходит в asyncio.to_thread,
+        поэтому event loop не замерзает и asyncio.sleep() точен до миллисекунд
+        вместо неопределённых задержек от планировщика ОС у threading.
+        """
         sleep_sec    = self.TF_SLEEP.get(tf, 60)
         last_signals: Dict[str, datetime] = {}
 
@@ -129,12 +166,18 @@ class MorrisBot:
 
         while True:
             try:
-                df_raw = self.fetch_data(ticker, tf)
+                # fetch_data — сетевой вызов → thread-pool, event loop свободен
+                df_raw = await asyncio.to_thread(self.fetch_data, ticker, tf)
+
                 if df_raw.empty:
                     print(f"[Worker] Нет данных: {ticker} {tf}")
                 else:
-                    detector = self.get_detector(ticker, tf, indicator)
-                    df       = self._prepare_df(df_raw, detector)
+                    detector = await self.get_detector(ticker, tf, indicator)
+
+                    # CPU-bound pandas → thread-pool
+                    df = await asyncio.to_thread(
+                        self._prepare_df_sync, df_raw, detector
+                    )
 
                     # len(df)-1 может быть формирующейся свечой — берём len(df)-2
                     # как последнюю гарантированно закрытую.
@@ -146,48 +189,84 @@ class MorrisBot:
 
                     patterns = detector.get_pattern_at_index(df, pattern_idx)
 
-                    for pattern in patterns:
-                        sig_key = f"{ticker}_{tf}_{pattern}"
-                        c_time  = df.loc[pattern_idx, 'datetime']
-
-                        if last_signals.get(sig_key) == c_time:
-                            continue
-
-                        img_path = ChartVisualizer.create_screenshot(
-                            df, ticker, tf, pattern, c_time,
-                            detector.config.indicator,
-                            output_dir=self.output_dir
+                    # Обрабатываем все паттерны конкурентно
+                    tasks = [
+                        self._handle_pattern(
+                            pattern, ticker, tf, df, pattern_idx, last_idx,
+                            detector, last_signals
                         )
+                        for pattern in patterns
+                    ]
+                    if tasks:
+                        await asyncio.gather(*tasks)
 
-                        is_bullish      = any(x in pattern.lower() for x in
-                                              ['bull', 'hammer', 'morning', 'soldier', 'piercing'])
-                        direction_emoji = "🟢" if is_bullish else "🔴"
-                        ind_str = self._format_ind_str(detector, df, last_idx)
-
-                        msg = (
-                            f"{direction_emoji} *{pattern}*\n"
-                            f"📊 `{ticker}` | `{tf}`\n"
-                            f"💰 Цена: `{df.loc[last_idx, 'close']}`"
-                            f"{ind_str}"
-                        )
-
-                        if img_path:
-                            self.router.send_photo(ticker, tf, msg, img_path)
-                            os.remove(img_path)
-                        else:
-                            self.router.send_message(ticker, tf, msg)
-
-                        last_signals[sig_key] = c_time
-
+            except asyncio.CancelledError:
+                print(f"[Worker] Остановка: {ticker} {tf}")
+                return
             except Exception as e:
                 print(f"[Worker] Ошибка {ticker} {tf}: {e}")
 
-            time.sleep(sleep_sec)
+            # asyncio.sleep точнее time.sleep — не зависит от планировщика ОС
+            await asyncio.sleep(sleep_sec)
+
+    async def _handle_pattern(
+        self,
+        pattern: str,
+        ticker: str,
+        tf: str,
+        df: pd.DataFrame,
+        pattern_idx: int,
+        last_idx: int,
+        detector: PatternDetector,
+        last_signals: Dict[str, datetime],
+    ):
+        """
+        Обрабатывает один паттерн: рисует график и отправляет сообщение.
+        Вынесено отдельно, чтобы asyncio.gather мог запускать паттерны параллельно.
+        """
+        sig_key = f"{ticker}_{tf}_{pattern}"
+        c_time  = df.loc[pattern_idx, 'datetime']
+
+        if last_signals.get(sig_key) == c_time:
+            return
+
+        # Рендер графика — CPU + диск → thread-pool
+        img_path = await asyncio.to_thread(
+            ChartVisualizer.create_screenshot,
+            df, ticker, tf, pattern, c_time,
+            detector.config.indicator,
+            output_dir=self.output_dir,
+        )
+
+        is_bullish      = any(x in pattern.lower() for x in
+                              ['bull', 'hammer', 'morning', 'soldier', 'piercing'])
+        direction_emoji = "🟢" if is_bullish else "🔴"
+        ind_str         = self._format_ind_str(detector, df, last_idx)
+
+        msg = (
+            f"{direction_emoji} *{pattern}*\n"
+            f"📊 `{ticker}` | `{tf}`\n"
+            f"💰 Цена: `{df.loc[last_idx, 'close']}`"
+            f"{ind_str}"
+        )
+
+        # Отправка в Telegram — сетевой вызов → thread-pool
+        if img_path:
+            await asyncio.to_thread(self.router.send_photo, ticker, tf, msg, img_path)
+            os.remove(img_path)
+        else:
+            await asyncio.to_thread(self.router.send_message, ticker, tf, msg)
+
+        last_signals[sig_key] = c_time
+
+    # ------------------------------------------------------------------
+    # Запуск
+    # ------------------------------------------------------------------
 
     def run(self, config: Dict[str, List[str]],
             indicators: Dict[str, BaseIndicator] = None):
         """
-        Запускает отдельный поток для каждой пары ticker × tf.
+        Запускает event loop и создаёт asyncio.Task для каждой пары ticker × tf.
 
         Args:
             config:     {ticker: [tf, ...]}
@@ -211,33 +290,49 @@ class MorrisBot:
                 }
             )
         """
+        asyncio.run(self._run_async(config, indicators))
+
+    async def _run_async(self, config: Dict[str, List[str]],
+                         indicators: Optional[Dict[str, BaseIndicator]] = None):
+        """Внутренний async-метод: создаёт задачи и ждёт их."""
         indicators = indicators or {}
-        threads = []
+        tasks: List[asyncio.Task] = []
+
         for ticker, timeframes in config.items():
             for tf in timeframes:
-                # Каждый поток получает глубокую копию индикатора
-                # чтобы избежать Race Condition при параллельном compute().
+                # Каждая задача получает глубокую копию индикатора,
+                # чтобы избежать гонок при параллельном compute().
                 # deepcopy корректно копирует DualConfirmIndicator с sub-объектами.
                 ind_factory = indicators.get(ticker)
                 ind = copy.deepcopy(ind_factory) if ind_factory else None
-                t = threading.Thread(
-                    target=self._worker,
-                    args=(ticker, tf, ind),
-                    name=f"{ticker}_{tf}",
-                    daemon=True
-                )
-                threads.append(t)
-                t.start()
 
-        total = len(threads)
-        print(f"[MorrisBot] Запущено {total} потоков: "
-              f"{', '.join(t.name for t in threads)}")
+                task = asyncio.create_task(
+                    self._worker(ticker, tf, ind),
+                    name=f"{ticker}_{tf}",
+                )
+                tasks.append(task)
+
+        total = len(tasks)
+        print(f"[MorrisBot] Запущено {total} задач: "
+              f"{', '.join(t.get_name() for t in tasks)}")
 
         try:
-            while True:
-                time.sleep(1)
+            # Ждём все задачи — они бесконечны, пока не придёт прерывание
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            pass
         except KeyboardInterrupt:
+            pass
+        finally:
+            # Корректная отмена всех задач при Ctrl+C
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             print("[MorrisBot] Остановка по Ctrl+C")
+
+    # ------------------------------------------------------------------
+    # Получение данных (синхронный, вызывается через asyncio.to_thread)
+    # ------------------------------------------------------------------
 
     def fetch_data(self, ticker: str, tf: str, days: int = 5) -> pd.DataFrame:
         try:

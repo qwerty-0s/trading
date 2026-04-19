@@ -1,0 +1,7 @@
+tinkoff-investments>=0.2.0b60
+python-telegram-bot>=21.0
+python-dotenv>=1.0
+pandas>=2.0
+numpy>=1.24
+plotly>=5.0
+kaleido>=0.2      # plotly PNG export

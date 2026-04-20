@@ -1,24 +1,21 @@
 """
 data_loader/loader.py
 ---------------------
-Два компонента:
-
-1. InstrumentResolver — при старте ищет актуальный FIGI для каждого фьюча
-   через T-Invest InstrumentsService (futures меняют FIGI при экспирации).
-
-2. StreamLoader — gRPC MarketDataStream, подписка на 1-мин закрытые свечи,
-   роутинг в asyncio.Queue нужного AssetWorker.
-   Автоматически переподключается при обрыве.
+1. InstrumentResolver — резолвит FIGI фьючей при старте.
+2. StreamLoader       — gRPC MarketDataStream (1min, waiting_close=True)
+                        + prefill_history() через REST API.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List
 
 from t_tech.invest import (
     AsyncClient,
     CandleInstrument,
+    CandleInterval,
     MarketDataRequest,
     SubscribeCandlesRequest,
     SubscriptionAction,
@@ -26,7 +23,7 @@ from t_tech.invest import (
 )
 from t_tech.invest.utils import quotation_to_decimal
 
-from config import AssetConfig, STREAM_RECONNECT_DELAY, TINKOFF_TOKEN
+from config import AssetConfig, CANDLE_HISTORY, STREAM_RECONNECT_DELAY, TIMEFRAMES, TINKOFF_TOKEN
 from core.candle_aggregator import Candle
 from core.asset_worker import AssetWorker
 
@@ -38,18 +35,8 @@ _1MIN = SubscriptionInterval.SUBSCRIPTION_INTERVAL_ONE_MINUTE
 # ── FIGI Resolver ─────────────────────────────────────────────────────────────
 
 class InstrumentResolver:
-    """
-    Находит актуальный FIGI для фьючерсного тикера.
-    T-Invest возвращает все активные контракты по базовому тикеру
-    (напр. "Si" → SiM5, SiH5, …). Берём ближайший по дате экспирации.
-    """
-
     @staticmethod
     async def resolve_all(assets: List[AssetConfig]) -> None:
-        """
-        Заполняет поле .figi у каждого AssetConfig на месте (in-place).
-        Вызывать один раз при старте.
-        """
         async with AsyncClient(TINKOFF_TOKEN) as client:
             for asset in assets:
                 try:
@@ -61,7 +48,6 @@ class InstrumentResolver:
 
     @staticmethod
     async def _find_figi(client, ticker: str) -> str:
-        from t_tech.invest import InstrumentStatus
         resp = await client.instruments.find_instrument(query=ticker)
         instruments = [
             i for i in resp.instruments
@@ -71,37 +57,116 @@ class InstrumentResolver:
         if not instruments:
             raise ValueError(f"No futures found for ticker '{ticker}'")
 
-        # Среди найденных берём ближайший к экспирации (наименьший expiry_date > now)
-        from datetime import datetime, timezone
         now = datetime.now(tz=timezone.utc)
         future_contracts = [
             i for i in instruments
             if hasattr(i, 'expiry_date') and i.expiry_date and i.expiry_date > now
         ]
-        if future_contracts:
-            nearest = min(future_contracts, key=lambda i: i.expiry_date)
-        else:
-            nearest = instruments[0]   # fallback
-
+        nearest = min(future_contracts, key=lambda i: i.expiry_date) \
+                  if future_contracts else instruments[0]
         return nearest.figi
 
 
 # ── Stream Loader ─────────────────────────────────────────────────────────────
 
 class StreamLoader:
-    """
-    Держит один gRPC stream на все активы.
-    При разрыве — переподключается через STREAM_RECONNECT_DELAY секунд.
-    """
-
     def __init__(
         self,
-        assets:  List[AssetConfig],
-        workers: Dict[str, AssetWorker],   # figi → worker
+        assets:     List[AssetConfig],
+        workers:    Dict[str, AssetWorker],
+        timeframes: List[int] = TIMEFRAMES,
     ) -> None:
-        self._assets  = assets
-        self._workers = workers
-        self._figi_to_ticker = {a.figi: a.ticker for a in assets}
+        self._assets          = assets
+        self._workers         = workers
+        self._timeframes      = timeframes
+        self._figi_to_ticker  = {a.figi: a.ticker for a in assets}
+
+    # ── Prefill ───────────────────────────────────────────────────────────────
+
+    async def prefill_history(self) -> None:
+        max_tf       = max(self._timeframes)
+        minutes_back = int(max_tf * CANDLE_HISTORY * 1.1)
+        from_dt      = datetime.now(timezone.utc) - timedelta(minutes=minutes_back)
+
+        tf_coverage = {tf: minutes_back // tf for tf in self._timeframes}
+        logger.info(
+            "Prefilling history: last %d min (~%.1fh) per asset | expected candles: %s",
+            minutes_back, minutes_back / 60, tf_coverage,
+        )
+
+        async with AsyncClient(TINKOFF_TOKEN) as client:
+            for asset in self._assets:
+                if not asset.figi:
+                    continue
+                worker = self._workers.get(asset.figi)
+                if not worker:
+                    continue
+                await self._prefill_asset(client, asset, worker, from_dt)
+
+        logger.info("Prefill complete — detectors ready")
+
+    async def _prefill_asset(
+        self,
+        client,
+        asset:   AssetConfig,
+        worker:  AssetWorker,
+        from_dt: datetime,
+    ) -> None:
+        try:
+            all_candles = []
+            chunk_start = from_dt
+            now         = datetime.now(timezone.utc)
+
+            while chunk_start < now:
+                # Строгое ограничение T-Invest: не более 1 дня за запрос для 1min
+                chunk_end = min(chunk_start + timedelta(hours=24), now)
+                
+                resp = await client.market_data.get_candles(
+                    figi     = asset.figi,
+                    from_    = chunk_start,
+                    to       = chunk_end,
+                    interval = CandleInterval.CANDLE_INTERVAL_1_MIN,
+                )
+                batch = [c for c in resp.candles if c.is_complete]
+                all_candles.extend(batch)
+                
+                chunk_start = chunk_end
+                # Обязательная пауза, чтобы не упереться в ratelimit при загрузке 36 дней х 6 активов
+                await asyncio.sleep(0.15) 
+
+            if not all_candles:
+                logger.warning("[%s] prefill: no candles received", asset.ticker)
+                return
+
+            seen  = set()
+            dedup = []
+            for c in sorted(all_candles, key=lambda x: x.time):
+                if c.time not in seen:
+                    seen.add(c.time)
+                    dedup.append(c)
+
+            logger.info("[%s] prefill: %d raw 1min candles loaded", asset.ticker, len(dedup))
+
+            for c in dedup:
+                candle = Candle(
+                    ticker    = asset.ticker,
+                    timeframe = 1,
+                    open_time = c.time,
+                    open      = float(quotation_to_decimal(c.open)),
+                    high      = float(quotation_to_decimal(c.high)),
+                    low       = float(quotation_to_decimal(c.low)),
+                    close     = float(quotation_to_decimal(c.close)),
+                    volume    = c.volume,
+                )
+                worker._aggregator.push(candle)
+
+            summary = {tf: worker._aggregator.history_len(tf) for tf in self._timeframes}
+            logger.info("[%s] prefill done: %s", asset.ticker, summary)
+
+        except Exception as exc:
+            logger.error("[%s] prefill error: %s", asset.ticker, exc)
+
+    # ── Stream ────────────────────────────────────────────────────────────────
 
     async def run_forever(self) -> None:
         while True:
@@ -116,7 +181,6 @@ class StreamLoader:
                     exc, STREAM_RECONNECT_DELAY,
                 )
                 await asyncio.sleep(STREAM_RECONNECT_DELAY)
-                # Обновить маппинг на случай смены FIGI после экспирации
                 self._figi_to_ticker = {a.figi: a.ticker for a in self._assets}
 
     async def _stream_once(self) -> None:
@@ -137,13 +201,13 @@ class StreamLoader:
                         CandleInstrument(figi=figi, interval=_1MIN)
                         for figi in figis
                     ],
-                    waiting_close=True,   # ← только закрытые свечи
+                    waiting_close=True,
                 )
             )
 
             async def _requests():
                 yield subscribe_req
-                await asyncio.Future()   # держим соединение открытым
+                await asyncio.Future()
 
             async for response in client.market_data_stream.market_data_stream(_requests()):
                 await self._dispatch(response)

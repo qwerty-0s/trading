@@ -2,9 +2,10 @@
 main.py — точка входа
 1. Резолвим FIGI фьючей через T-Invest API
 2. Создаём / проверяем темы в Telegram-супергруппах (TopicManager)
-3. Запускаем AssetWorker на каждый актив
-4. Запускаем gRPC стрим
-5. Graceful shutdown по SIGINT/SIGTERM
+3. Создаём воркеры
+4. Prefill истории через REST API → детектор готов сразу
+5. Запускаем gRPC стрим
+6. Graceful shutdown по SIGINT/SIGTERM
 """
 from __future__ import annotations
 
@@ -63,16 +64,21 @@ async def _run() -> None:
             timeframes     = TIMEFRAMES,
         )
 
+    # ── 5. Prefill истории ────────────────────────────────────────────────────
+    loader = StreamLoader(
+        assets     = active_assets,
+        workers    = workers_by_figi,
+        timeframes = TIMEFRAMES,
+    )
+    await loader.prefill_history()
+
+    # ── 6. Запускаем воркеры и стрим ─────────────────────────────────────────
     worker_tasks = [
         asyncio.create_task(w.run(), name=f"worker:{a.ticker}")
         for a, w in zip(active_assets, workers_by_figi.values())
     ]
-
-    # ── 5. gRPC стрим ────────────────────────────────────────────────────────
-    loader      = StreamLoader(assets=active_assets, workers=workers_by_figi)
     stream_task = asyncio.create_task(loader.run_forever(), name="stream")
-
-    all_tasks = worker_tasks + [stream_task]
+    all_tasks   = worker_tasks + [stream_task]
 
     logger.info(
         "✅ Running: %s | TFs: %s",
@@ -80,7 +86,7 @@ async def _run() -> None:
         TIMEFRAMES,
     )
 
-    # ── 6. Ждём отмены ───────────────────────────────────────────────────────
+    # ── 7. Ждём отмены ───────────────────────────────────────────────────────
     try:
         await asyncio.gather(*all_tasks)
     except asyncio.CancelledError:

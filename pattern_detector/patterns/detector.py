@@ -34,7 +34,6 @@ class PatternDetector:
     def get_pattern_at_index(self, df: pd.DataFrame, idx: int) -> List[str]:
         if idx < 12:
             return []
-        
         self._update_context(df, idx)
 
         c  = df.iloc[idx]

@@ -20,6 +20,7 @@ from core.topic_manager import TopicManager
 from data_loader.loader import InstrumentResolver, StreamLoader
 from sending.telegram_router import TelegramRouter
 from visualization.visualisation import ChartVisualizer
+from indicators.mfi import AdaptiveMFIIndicator
 
 logging.basicConfig(
     level   = logging.INFO,
@@ -46,7 +47,8 @@ async def _run() -> None:
     # ── 2. Shared зависимости ─────────────────────────────────────────────────
     router         = TelegramRouter()
     visualizer     = ChartVisualizer()
-    scanner_config = ScannerConfig()
+    mfi_indicator = AdaptiveMFIIndicator(init_ob=55, init_os=45)
+    scanner_config = ScannerConfig(indicator=mfi_indicator)
 
     # ── 3. Создаём / проверяем темы в супергруппах ───────────────────────────
     topic_manager = TopicManager(bot=router.bot, timeframes=TIMEFRAMES)

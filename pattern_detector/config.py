@@ -44,7 +44,7 @@ class AssetConfig:
     figi: str = ""    # заполняется автоматически InstrumentResolver при старте
 
 ASSETS: List[AssetConfig] = [
-    AssetConfig(ticker="SiM6", tg_chat_id=-1003916417055),
+    AssetConfig(ticker="SiM6",  tg_chat_id=-1003916417055),
     AssetConfig(ticker="KCJ6",  tg_chat_id=-1003716674818),
     AssetConfig(ticker="BRK6",  tg_chat_id=-1003750564099),
     AssetConfig(ticker="CCJ6",  tg_chat_id=-1003944653501),

@@ -19,27 +19,26 @@ if __name__ == "__main__":
     # visual_backtest('BRJ6', '15min', 2, indicator=NoIndicator())
 
     # ── Статистический бэктест (с подтверждением паттернов) ───────────────
-    # run_backtest('SBER', '15min', days=20,
-    #              indicator=RSIIndicator(14),
-    #              use_pattern_confirmation=True,
-    #              forward_candles=10,
-    #              min_move_pct=0.2)
-
+    """run_backtest('BRK6', '15min', days=20,
+                  indicator=AdaptiveMFIIndicator(),
+                  use_pattern_confirmation=False,
+                  forward_candles=10,
+                  min_move_pct=0.2)
+    """
     # ── Стратегический бэктест: SL на экстремуме, TP на EMA10 ─────────────
-    """params = StrategyParams(
+    params = StrategyParams(
         sl_lookback=5,
         max_candles=20,
-        use_pattern_confirmation=True,
+        use_pattern_confirmation=False,
         simultaneous_hit='sl_first',
     )
 
     visual_strategy_backtest(
-        ticker='SBER',
+        ticker='BRK6',
         tf='15min',
         days=30,
-        indicator=RSIIndicator(14, oversold=35, overbought=65),
-        params=params,
-    )"""
+        indicator=AdaptiveMFIIndicator(),
+    )
 
     # ── Dual-индикатор ─────────────────────────────────────────────────────
     # dual = DualConfirmIndicator(BollingerPercentBIndicator(), AdaptiveMFIIndicator())
@@ -65,8 +64,7 @@ if __name__ == "__main__":
     
     #test_all_topics()
     
-    bot = MorrisBot()
-
+    """bot = MorrisBot()
     bot.run(
     config={
         'SiM6': ['15min', '30min'],
@@ -78,4 +76,4 @@ if __name__ == "__main__":
         'SVM6': ['15min', '30min'],
     },
     indicators={ticker: AdaptiveMFIIndicator() for ticker in ['SiM6', 'BRK6', 'CCJ6', 'NGK6', 'KCJ6', 'GDM6', 'SVM6']},
-    )
+    )"""

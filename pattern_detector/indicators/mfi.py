@@ -29,13 +29,17 @@ class AdaptiveMFIIndicator(BaseIndicator):
                  iterations: int = 5,
                  init_ob: float = 80.0,
                  init_ne: float = 50.0,
-                 init_os: float = 20.0):
+                 init_os: float = 20.0,
+                 bullish_threshold: float = 20.0,
+                 bearish_threshold: float = 80.0):
         self.mfi_len = mfi_len
         self.training_size = training_size
         self.iterations = iterations
         self.init_ob = init_ob
         self.init_ne = init_ne
         self.init_os = init_os
+        self.bullish_threshold = bullish_threshold
+        self.bearish_threshold = bearish_threshold
 
     @property
     def column_name(self) -> str:
@@ -86,14 +90,14 @@ class AdaptiveMFIIndicator(BaseIndicator):
         return result
 
     def confirms_bullish(self, value: float) -> bool:
-        return value <= 20.0
+        return value <= self.bullish_threshold
 
     def confirms_bearish(self, value: float) -> bool:
-        return value >= 80.0
+        return value >= self.bearish_threshold
 
     def get_level_lines(self) -> List[dict]:
         return [
-            {"value": 80, "color": "red",   "dash": "dash"},
-            {"value": 20, "color": "green", "dash": "dash"},
+            {"value": self.bearish_threshold, "color": "red",   "dash": "dash"},
+            {"value": self.bullish_threshold, "color": "green", "dash": "dash"},
             {"value": 50, "color": "gray",  "dash": "dot"},
         ]

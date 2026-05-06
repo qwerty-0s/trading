@@ -47,7 +47,7 @@ async def _run() -> None:
     # ── 2. Shared зависимости ─────────────────────────────────────────────────
     router         = TelegramRouter()
     visualizer     = ChartVisualizer()
-    mfi_indicator = AdaptiveMFIIndicator(init_ob=55, init_os=45)
+    mfi_indicator = AdaptiveMFIIndicator(bullish_threshold=35, bearish_threshold=65)
     scanner_config = ScannerConfig(indicator=mfi_indicator)
 
     # ── 3. Создаём / проверяем темы в супергруппах ───────────────────────────

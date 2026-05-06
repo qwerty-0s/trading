@@ -130,7 +130,11 @@ class CandleAggregator:
             return pd.DataFrame()
 
         df = pd.DataFrame({
-            "datetime": [c.open_time for c in hist],
+            "datetime": [
+                c.open_time if c.open_time.tzinfo is not None
+                else c.open_time.replace(tzinfo=timezone.utc)
+                for c in hist
+        ],
             "open":     [c.open      for c in hist],
             "high":     [c.high      for c in hist],
             "low":      [c.low       for c in hist],
@@ -143,7 +147,9 @@ class CandleAggregator:
 
         # Дополнительный индикатор (RSI, MACD, …)
         if indicator is not None:
-            df = indicator.compute(df)
+            from indicators.base import NoIndicator
+            if not isinstance(indicator, NoIndicator):
+                df[indicator.column_name] = indicator.compute(df)
 
         df.reset_index(drop=True, inplace=True)
         return df

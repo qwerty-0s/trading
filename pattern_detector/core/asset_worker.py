@@ -112,11 +112,7 @@ class AssetWorker:
         if not patterns:
             return
 
-        signal_time = (
-            candle.open_time.replace(tzinfo=timezone.utc)
-            if candle.open_time.tzinfo is None
-            else candle.open_time
-        )
+        signal_time = df.loc[last_idx, "datetime"]
 
         # Получаем thread_id темы для этого TF
         thread_id: Optional[int] = self.topic_manager.get_thread_id(

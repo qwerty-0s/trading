@@ -637,8 +637,8 @@ async def main():
     Пример запуска. Замени token, figi и импорты PatternDetector на свои.
     """
     import os
-    # from config import TINKOFF_TOKEN
-    # from patterns.detector import PatternDetector
+    from config import TINKOFF_TOKEN
+    from patterns.detector import PatternDetector
     from data_loader.loader import InstrumentResolver
 
     TOKEN = os.getenv("TINKOFF_TOKEN", "")
@@ -660,7 +660,7 @@ async def main():
     print(f"   10m: {len(df_10m)} свечей | 1h: {len(df_1h)} свечей")
 
     # Создаём стратегию
-    """detector = PatternDetector(ScannerConfig())
+    detector = PatternDetector(ScannerConfig())
     
     strategy = CandlePatternStrategy(
          detector=detector,
@@ -672,11 +672,11 @@ async def main():
      )
 
     # Запускаем движок
-    engine = BacktestEngine(strategy, initial_balance=100_000, position_size=800.0)
+    engine = BacktestEngine(strategy, initial_balance=100_000, position_size=10)
     portfolio = engine.run(df_10m, htf_df=df_1h)
     df_trades = engine.report()
     engine.visualize(df_10m)
-    """
+    
     """
     from strategies.wavetrend_strategy import WaveTrendStrategy
 
@@ -694,7 +694,7 @@ async def main():
     #print("\n✅ Шаблон готов. Раскомментируй нужные строки и подключи свои модули.")
     """
     
-    
+    """
     from strategies.wavetrend_strategy_v2 import WaveTrendStrategyV2, PARAM_GRID
 
     strategy = WaveTrendStrategyV2(**PARAM_GRID['balanced'])
@@ -708,6 +708,6 @@ async def main():
     df_prep = strategy.prepare(df_10m)
     print(df_prep[['time','wt1','wt2','adx','_last_signal']].dropna().tail(20))
     print("Кроссоверов всего:", df_prep['_last_signal'].notna().sum())
-
+    """
 if __name__ == "__main__":
     asyncio.run(main())

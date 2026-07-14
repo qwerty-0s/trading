@@ -52,6 +52,7 @@ ASSETS: List[AssetConfig] = [
     AssetConfig(ticker="GDM6",  tg_chat_id=-1003949836612),
 ]
 
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 STREAM_RECONNECT_DELAY: int = 5
 TG_SEND_TIMEOUT: int        = 15

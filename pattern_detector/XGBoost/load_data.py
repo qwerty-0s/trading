@@ -7,13 +7,20 @@ Workflow:
     python load_data.py              # собрать датасет за 90 дней
     python load_data.py --days 60    # короче
 
-Выход: si_patterns_dataset.parquet
+Выход: si_patterns_dataset.parquet — готовый датасет для обучения XGBoost.
 """
+
+
 from __future__ import annotations
+
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 import logging
 import sys
+import threading
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
@@ -43,12 +50,91 @@ log = logging.getLogger(__name__)
 
 # Контракты в хронологическом порядке экспирации.
 # Переход на следующий контракт — за ROLLOVER_DAYS дней до экспирации текущего.
-SI_CONTRACTS: List[Dict] = [
-    {"ticker": "SiZ5", "expiry": datetime(2025, 12, 18)},
-    {"ticker": "SiH6", "expiry": datetime(2026,  3, 19)},
-    {"ticker": "SiM6", "expiry": datetime(2026,  6, 18)},
-]
+#
+# ВАЖНО: раньше список был захардкожен вручную и обрывался на последнем добавленном
+# контракте. Из-за этого КАЖДЫЙ раз, когда очередной квартальный контракт истекал,
+# а список не обновляли, весь хвост свежих данных (от rollover до "сегодня")
+# ТИХО выпадал из датасета — без ошибки, только пропущенный log.warning.
+# Конкретно: на момент этого комментария список обрывался на SiM6 (эксп. 18.06.2026,
+# rollover 15.06.2026), а датасет собирался значительно позже — то есть ~месяц
+# самых свежих (и самых релевантных) данных не попадал в обучение вообще.
+#
+# Теперь список генерируется программно: экспирация Si — третий четверг
+# марта/июня/сентября/декабря (проверено на всех контрактах 2023-2026 без
+# исключений). Верхняя граница — "сейчас + запас", поэтому список никогда не
+# отстаёт. Нижнюю границу (SI_CONTRACTS_START_YEAR) можно смело ставить рано:
+# контракты без доступных на MOEX данных load_stitched_si просто пропустит
+# (см. лог "нет данных для ..."), пайплайн от этого не сломается.
+
+def _third_thursday(year: int, month: int) -> datetime:
+    """Третий четверг месяца — правило экспирации квартальных контрактов Si."""
+    d = datetime(year, month, 1)
+    offset = (3 - d.weekday()) % 7   # weekday(): Mon=0 ... Thu=3
+    first_thursday = d + timedelta(days=offset)
+    return first_thursday + timedelta(weeks=2)
+
+
+def _generate_si_contracts(start_year: int, forward_buffer_days: int = 100) -> List[Dict]:
+    """
+    Генерирует квартальные контракты Si (H=март, M=июнь, U=сентябрь, Z=декабрь)
+    от start_year до "сейчас + forward_buffer_days".
+
+    forward_buffer_days гарантирует, что список всегда включает контракт,
+    актуальный на момент запуска, даже если запускать сразу после rollover —
+    не даёт повториться ситуации с "потерянным месяцем" из комментария выше.
+    """
+    MONTH_CODES = {3: "H", 6: "M", 9: "U", 12: "Z"}
+    horizon = datetime.now() + timedelta(days=forward_buffer_days)
+
+    contracts: List[Dict] = []
+    year = start_year
+    while True:
+        stop = False
+        for month in (3, 6, 9, 12):
+            expiry = _third_thursday(year, month)
+            if expiry > horizon:
+                stop = True
+                break
+            contracts.append({
+                "ticker": f"Si{MONTH_CODES[month]}{year % 10}",
+                "expiry": expiry,
+            })
+        if stop:
+            break
+        year += 1
+    return contracts
+
+
+# Эмпирически: если MOEX/moexalgo не отдаёт данные так далеко назад, контракт
+# просто будет пропущен с предупреждением в логе — так что здесь не страшно
+# перестраховаться по времени.
+#
+# НО: тикер MOEX кодирует год ОДНОЙ цифрой (буква месяца + последняя цифра года,
+# например SiH5), а она циклится каждые 10 лет. Если взять историю глубже, чем
+# на 9 лет назад от текущего года, список начнёт содержать ОДИНАКОВЫЕ строки
+# тикеров для РАЗНЫХ реальных контрактов (например, SiH5 = март 2015 И март 2025
+# одновременно) — moexalgo не сможет их различить, и данные будут либо задвоены,
+# либо перепутаны. Поэтому старт жёстко привязан к текущему году - 9, а не к
+# фиксированной дате: так граница десятилетия никогда не будет нарушена, даже
+# если запускать этот код спустя годы.
+SI_CONTRACTS_START_YEAR = datetime.now().year - 9
+SI_CONTRACTS: List[Dict] = _generate_si_contracts(SI_CONTRACTS_START_YEAR)
+
 ROLLOVER_DAYS = 3       # дней до экспирации для переключения
+
+# ── Устойчивость сетевых запросов к MOEX ISS ────────────────────────────────────
+# moexalgo делает HTTP-запросы без явного timeout на чтение сокета. Если биржа
+# "подвешивает" TCP-сессию без RST/FIN (антифрод, перегрузка), Python блокируется
+# в recv() бессрочно — это НЕ исключение, try/except его не ловит, скрипт просто
+# висит без единого сообщения в логе. Поэтому оборачиваем вызов в daemon-поток
+# со сторожевым join(timeout=...): это единственный способ прервать блокирующий
+# синхронный сокет-вызов снаружи библиотеки, которая сама timeout не выставляет.
+FETCH_TIMEOUT_SEC      = 30    # макс. время ожидания ОДНОГО запроса t.candles()
+FETCH_MAX_RETRIES      = 3     # повторных попыток при таймауте/ошибке на контракт
+FETCH_RETRY_BACKOFF_SEC = 5    # база экспоненциального backoff между повторами
+RATE_LIMIT_DELAY_SEC   = 1.0   # пауза между запросами к РАЗНЫМ контрактам —
+                                # снижает риск словить рейт-лимит/антифрод ISS
+                                # при большом количестве контрактов (сейчас ~39)
 
 TF_PRIMARY  = "15min"  # основной таймфрейм (строка для moexalgo)
 TF_PRIMARY_MIN = 15    # в минутах (для агрегации)
@@ -63,7 +149,11 @@ FORWARD_BARS = 10      # свечей вперёд для разметки
 BB_PERIOD = 20
 BB_STD    = 2.0
 
-DAYS_BACK_DEFAULT = 90
+DAYS_BACK_DEFAULT = 3500  # расширено: 424 теста / 123 позитивных — мало для стабильной оценки precision.
+                          # ~9.5 лет — доходит примерно до SI_CONTRACTS_START_YEAR (текущий год - 9,
+                          # ограничено во избежание коллизии однозначных годовых кодов тикеров, см. выше).
+                          # Реальный потолок всё равно определяется тем, насколько глубоко в историю
+                          # отдаёт данные MOEX/moexalgo — контракты без данных просто пропускаются.
 
 # Списки паттернов — используем как справочник для классификации и признаков
 BULLISH_PATTERNS: set = {
@@ -143,6 +233,11 @@ def load_stitched_si(days_back: int = DAYS_BACK_DEFAULT) -> pd.DataFrame:
         else:
             log.warning("  → нет данных для %s", contract["ticker"])
 
+        # Пауза между контрактами — снижает риск рейт-лимита/антифрода при
+        # большом количестве последовательных запросов (сейчас ~39 контрактов,
+        # каждый из которых сам по себе может быть пагинирован MOEX по 500 строк).
+        time.sleep(RATE_LIMIT_DELAY_SEC)
+
     if not segments:
         raise RuntimeError(
             "Не удалось загрузить данные ни по одному контракту Si. "
@@ -159,31 +254,120 @@ def load_stitched_si(days_back: int = DAYS_BACK_DEFAULT) -> pd.DataFrame:
     return result
 
 
+def _call_with_timeout(fn, timeout_sec: float):
+    """
+    Запускает fn() в daemon-потоке и ждёт результата не дольше timeout_sec.
+
+    ПОЧЕМУ ПОТОК, А НЕ ПРОСТО ТАЙМАУТ БИБЛИОТЕКИ:
+    Python не может принудительно прервать блокирующий синхронный сокет-вызов
+    (recv()) снаружи — ни исключением, ни сигналом изнутри другого потока.
+    Максимум, что доступно: подождать фиксированное время и, если поток не
+    вернулся, СЧИТАТЬ операцию проваленной и пойти дальше, оставив зависший
+    поток доживать в фоне. daemon=True гарантирует, что такой "осиротевший"
+    поток не помешает процессу завершиться штатно по окончании скрипта.
+
+    Возвращает (result, error, timed_out).
+    """
+    box: Dict = {}
+
+    def _runner():
+        try:
+            box["result"] = fn()
+        except Exception as exc:  # noqa: BLE001 — нужно поймать всё, включая сторонние ошибки moexalgo
+            box["error"] = exc
+
+    th = threading.Thread(target=_runner, daemon=True)
+    th.start()
+    th.join(timeout=timeout_sec)
+
+    if th.is_alive():
+        return None, None, True          # завис — поток брошен, идём дальше
+    if "error" in box:
+        return None, box["error"], False
+    return box.get("result"), None, False
+
+
+def _is_moexalgo_empty_data_bug(error: Exception) -> bool:
+    """
+    Распознаёт известный баг moexalgo: при пустом ответе ISS (нет минутных
+    свечей за период — обычно для старых истёкших контрактов) библиотека
+    падает с AttributeError вместо того, чтобы вернуть пустой список, потому
+    что пытается вызвать .isoformat() на дате курсора пагинации, которой нет.
+
+    Это ДЕТЕРМИНИРОВАННАЯ ошибка: повторный запрос вернёт тот же пустой ответ
+    и упадёт точно так же. Ретраить её — чистая трата времени (up to 30с
+    бэкоффа на контракт), поэтому такие случаи нужно сразу трактовать как
+    "данных нет" и идти дальше, а не жечь FETCH_MAX_RETRIES попыток.
+    """
+    return (
+        isinstance(error, AttributeError)
+        and "isoformat" in str(error)
+    )
+
+
 def _fetch_candles(ticker: str, start: datetime, end: datetime) -> Optional[pd.DataFrame]:
-    """Загружает 15min свечи одного контракта через moexalgo."""
-    try:
-        t    = Ticker(ticker)
-        data = t.candles(
+    """
+    Загружает 15min свечи одного контракта через moexalgo.
+
+    Устойчиво к зависанию сокета (см. _call_with_timeout) и к временным сетевым
+    сбоям/рейт-лимиту MOEX ISS (retry с экспоненциальным backoff). Отдельно
+    распознаёт известный детерминированный баг moexalgo на пустых ответах
+    (см. _is_moexalgo_empty_data_bug) и не тратит на него повторы.
+    """
+    def _do_request():
+        t = Ticker(ticker)
+        return t.candles(
             start  = start.strftime("%Y-%m-%d"),
             end    = end.strftime("%Y-%m-%d"),
             period = TF_PRIMARY,
         )
-        df = pd.DataFrame(data)
-        if df.empty:
-            return None
 
-        # moexalgo называет время открытия 'begin'
-        df = df.rename(columns={"begin": "datetime"})
-        df["datetime"] = pd.to_datetime(df["datetime"])
+    for attempt in range(1, FETCH_MAX_RETRIES + 1):
+        data, error, timed_out = _call_with_timeout(_do_request, FETCH_TIMEOUT_SEC)
 
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        if timed_out:
+            log.warning(
+                "[%s] Таймаут запроса (>%ds), попытка %d/%d — возможно, "
+                "MOEX подвесил сокет или сработал антифрод/рейт-лимит",
+                ticker, FETCH_TIMEOUT_SEC, attempt, FETCH_MAX_RETRIES,
+            )
+        elif error is not None:
+            if _is_moexalgo_empty_data_bug(error):
+                log.info(
+                    "[%s] Похоже, за этот период нет минутных данных на MOEX "
+                    "(известный баг moexalgo на пустом ответе: %s) — "
+                    "пропускаю без повторов, ретраить бессмысленно",
+                    ticker, error,
+                )
+                return None
+            log.warning(
+                "[%s] Ошибка запроса: %s — попытка %d/%d",
+                ticker, error, attempt, FETCH_MAX_RETRIES,
+            )
+        else:
+            df = pd.DataFrame(data)
+            if df.empty:
+                return None
 
-        return df[["datetime", "open", "high", "low", "close", "volume"]].copy()
+            # moexalgo называет время открытия 'begin'
+            df = df.rename(columns={"begin": "datetime"})
+            df["datetime"] = pd.to_datetime(df["datetime"])
 
-    except Exception as exc:
-        log.error("[%s] Ошибка загрузки: %s", ticker, exc)
-        return None
+            for col in ["open", "high", "low", "close", "volume"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            return df[["datetime", "open", "high", "low", "close", "volume"]].copy()
+
+        if attempt < FETCH_MAX_RETRIES:
+            backoff = FETCH_RETRY_BACKOFF_SEC * attempt   # линейно растущий backoff
+            log.info("[%s] Жду %.0fс перед повтором...", ticker, backoff)
+            time.sleep(backoff)
+
+    log.error(
+        "[%s] Не удалось загрузить данные за %d попыток — пропускаю контракт",
+        ticker, FETCH_MAX_RETRIES,
+    )
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -514,7 +698,12 @@ def extract_features(df: pd.DataFrame, idx: int, pattern: str) -> Optional[Dict]
         E — тренд и позиция цены
         F — волатильность
         G — старший ТФ
-        H — время (внутридневная сезонность)
+
+    Время суток (hour/day_of_week) намеренно исключено из признаков:
+    на SHAP-анализе оно давало экстремальный разброс по отдельным часам
+    при небольшой выборке — похоже на переобучение на шум, а не на
+    устойчивую внутридневную сезонность. Если позже накопится выборка
+    побольше, стоит проверить сезонность отдельно, вне модели.
     """
     if idx < 22:   # нужно ≥22 свечей истории для стабильных индикаторов
         return None
@@ -602,11 +791,11 @@ def extract_features(df: pd.DataFrame, idx: int, pattern: str) -> Optional[Dict]
             (not is_bullish and _safe(c, "htf_trend", 0.0) < 0)
         ),
 
-        # ── H. Время (внутридневная сезонность) ───────────────────────────────
-        "hour":        c.datetime.hour,
-        "day_of_week": c.datetime.dayofweek,
-
         # ── Метаданные (не фичи, используются для анализа) ───────────────────
+        # "hour"/"day_of_week" сюда сознательно не включены: на SHAP они давали
+        # экстремальный разброс по отдельным часам при небольшой выборке —
+        # похоже на переобучение на шум, а не на устойчивую сезонность.
+        # build_dataset() сам добавит "datetime" из row — здесь его дублировать не нужно.
         "pattern":    pattern,
         "is_bullish": int(is_bullish),
     }
@@ -722,10 +911,15 @@ def print_dataset_summary(dataset: pd.DataFrame) -> None:
     print("\n  HTF-согласованность:")
     print(dataset.groupby("htf_agreement")["label"].agg(["count", "mean"]).to_string())
 
-    print("\n  По часам торговли:")
-    hourly = dataset.groupby("hour")["label"].agg(count="count", reversal_rate="mean")
+    print("\n  По часам торговли (диагностика, НЕ признак модели):")
+    hourly = (
+        dataset.assign(hour=pd.to_datetime(dataset["datetime"]).dt.hour)
+        .groupby("hour")["label"]
+        .agg(count="count", reversal_rate="mean")
+    )
     hourly["reversal_rate"] = (hourly["reversal_rate"] * 100).round(1)
     print(hourly.to_string())
+    print("  (hour исключён из фичей модели — см. комментарий в extract_features)")
 
     print("═" * 60 + "\n")
 

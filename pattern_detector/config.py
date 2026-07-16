@@ -45,11 +45,12 @@ class AssetConfig:
 
 ASSETS: List[AssetConfig] = [
     AssetConfig(ticker="SiM6",  tg_chat_id=-1003916417055),
-    AssetConfig(ticker="KCJ6",  tg_chat_id=-1003716674818),
-    AssetConfig(ticker="BRK6",  tg_chat_id=-1003750564099),
-    AssetConfig(ticker="CCJ6",  tg_chat_id=-1003944653501),
-    AssetConfig(ticker="SVM6",  tg_chat_id=-1003994847530),
-    AssetConfig(ticker="GDM6",  tg_chat_id=-1003949836612),
+    AssetConfig(ticker="KCQ6",  tg_chat_id=-1003716674818),
+    AssetConfig(ticker="BRQ6",  tg_chat_id=-1003750564099),
+    AssetConfig(ticker="CCQ6",  tg_chat_id=-1003944653501),
+    AssetConfig(ticker="SVU6",  tg_chat_id=-1003994847530),
+    AssetConfig(ticker="GDU6",  tg_chat_id=-1003949836612),
+    AssetConfig(ticker="NGN6",  tg_chat_id=-1003994847530),
 ]
 
 

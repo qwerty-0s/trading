@@ -694,7 +694,7 @@ async def main():
     # 1. Получение токена и настройка актива
     TOKEN = os.getenv("TINKOFF_TOKEN", TINKOFF_TOKEN)
 
-    asset = ASSETS[4]
+    asset = ASSETS[0]
     print(f"⏳ Резолвим FIGI для {asset.ticker}...")
     await InstrumentResolver.resolve_all([asset])
     if not asset.figi:

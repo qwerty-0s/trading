@@ -8,8 +8,7 @@ import shap
 from typing import List, Tuple, Dict, Any
 
 # Импорт подготовщика данных
-from trading.pattern_detector.XGBoost.htf_mfi_no_candles.prepare_dataset_no_candles import generate_ml_dataset
-
+from prepare_dataset_no_candles import generate_ml_dataset
 
 # ======================================================================
 # 1. КОНФИГУРАЦИЯ И СПИСОК ФИЧЕЙ
@@ -259,7 +258,9 @@ def train_metalabel_model(
     # ------------------------------------------------------------------
     # СОХРАНЕНИЕ
     # ------------------------------------------------------------------
-    os.makedirs(os.path.dirname(save_model_path), exist_ok=True)
+    model_dir = os.path.dirname(save_model_path)
+    if model_dir:
+        os.makedirs(model_dir, exist_ok=True)
     
     payload = {
         'model': final_model,
@@ -279,4 +280,26 @@ def train_metalabel_model(
 # ТОЧКА ВХОДА ДЛЯ ЗАПУСКА
 # ======================================================================
 if __name__ == "__main__":
-    print("Файл готов к работе. Передайте исторические свечи 10m и 1h в train_metalabel_model().")
+    # Запуск как отдельный скрипт (в т.ч. через os.system из run_lab.py):
+    # берём уже закэшированные parquet-файлы из data/, ничего заново не качаем.
+    from load_data import load_data_sync
+
+    MODEL_PATH = os.getenv("XGB_MODEL_PATH", "xgb_model.pkl")
+    TAU_PATH = os.getenv("XGB_TAU_PATH", "xgb_threshold.txt")
+
+    TINKOFF_TOKEN = os.getenv("TINKOFF_TOKEN", "")
+    FIGI = os.getenv("FIGI", "FUTSI0626000")
+
+    print("📥 Загрузка данных (из кэша data/, если он есть)...")
+    df_10m, df_1h = load_data_sync(figi=FIGI, token=TINKOFF_TOKEN, days=180, force_reload=False)
+
+    model, tau, importance = train_metalabel_model(
+        df_10m=df_10m,
+        df_1h=df_1h,
+        save_model_path=MODEL_PATH,
+    )
+
+    # Дублируем tau в отдельный txt — так его умеет читать run_lab.py
+    with open(TAU_PATH, "w") as f:
+        f.write(str(tau))
+    print(f"💾 Порог Tau также сохранён отдельно в {TAU_PATH}")

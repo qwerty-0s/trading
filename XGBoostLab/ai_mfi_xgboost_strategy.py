@@ -4,12 +4,9 @@ import pandas as pd
 from datetime import datetime
 from typing import Optional
 
-# Импорт базовой стратегии и сигналов из движка бэктеста
-from strategy_test import BaseStrategy, Signal
-
-# Импорт функций расчета индикаторов и контекста HTF из готового скрипта
-from trading.pattern_detector.XGBoost.htf_mfi_no_candles.prepare_dataset_no_candles import compute_features_and_indicators, get_htf_context, get_htf_context
-
+from indicators.mfi import AdaptiveMFIIndicator
+from backtest_engine import BaseStrategy, Signal
+from prepare_dataset_no_candles import get_htf_context
 
 class AimfiXGBoostStrategy(BaseStrategy):
     """
@@ -51,20 +48,27 @@ class AimfiXGBoostStrategy(BaseStrategy):
 
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Предварительный расчет индикаторов на случай, 
-        если входной датасет еще не содержал рассчитываемые признаки.
+        Стратегия НЕ пересчитывает признаки сама — она требует, чтобы вызывающий код
+        (run_lab.py) уже прогнал df через compute_features_and_indicators() из
+        prepare_dataset_no_candles.py, ТЕМИ ЖЕ функциями, что использовались при
+        обучении модели. Пересчёт "похожих, но других" фичей здесь — прямой путь
+        к train/inference skew (модель получает не те данные, на которых училась).
         """
-        df = df.copy()
-        
-        if 'atr' not in df.columns:
-            hl = df['high'] - df['low']
-            hcp = (df['high'] - df['close'].shift()).abs()
-            lcp = (df['low'] - df['close'].shift()).abs()
-            df['atr'] = pd.concat([hl, hcp, lcp], axis=1).max(axis=1).rolling(14).mean()
-            
-        if 'ema10' not in df.columns:
-            df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
-
+        required = {
+            'aimfi', 'aimfi_diff1', 'aimfi_accel', 'bb_z_score', 'atr_norm',
+            'atr_regime', 'dist_to_high_20', 'dist_to_low_20', 'vol_ratio',
+            'vol_accel', 'vol_5d_ratio', 'dist_ema10', 'body_ratio',
+            'upper_shade_ratio', 'lower_shade_ratio', 'hour_sin', 'hour_cos',
+            'dayofweek', 'atr', 'ema10',
+        }
+        missing = required - set(df.columns)
+        if missing:
+            raise ValueError(
+                f"AimfiXGBoostStrategy: в df отсутствуют колонки {sorted(missing)}. "
+                f"Прогони df через compute_features_and_indicators() из "
+                f"prepare_dataset_no_candles.py перед запуском BacktestEngine — "
+                f"именно этот пайплайн использовался при обучении модели."
+            )
         return df
 
     def on_bar(
@@ -99,8 +103,11 @@ class AimfiXGBoostStrategy(BaseStrategy):
         if not (is_long_trigger or is_short_trigger):
             return None
 
-        # 2. Определение тренда и наклона HTF (без look-ahead bias)
-        htf_trend, htf_slope = get_htf_context(htf_df, row['time']) if (self.use_htf_filter and htf_df is not None) else (0, 0.0)
+        # 2. Определение тренда, наклона и уровня EMA10 HTF (без look-ahead bias)
+        if self.use_htf_filter and htf_df is not None:
+            htf_trend, htf_slope, htf_ema10 = get_htf_context(htf_df, row['time'])
+        else:
+            htf_trend, htf_slope, htf_ema10 = 0, 0.0, np.nan
 
         # 3. Базовая фильтрация по направлению тренда HTF
         sig_type_val = 0
@@ -112,21 +119,35 @@ class AimfiXGBoostStrategy(BaseStrategy):
         if sig_type_val == 0:
             return None
 
-        # 4. Формирование вектора признаков (точно в том порядке, как при обучении)
+        # dist_htf_ema10 — точно так же, как считалось в generate_ml_dataset()
+        dist_htf_ema10 = (row['close'] - htf_ema10) / htf_ema10 if not pd.isna(htf_ema10) else 0.0
+
+        # 4. Вектор признаков — СТРОГО те же 21 фича и те же формулы,
+        # что в FEATURE_COLS / generate_ml_dataset() из train_mfi_htf.py.
+        # Все значения берутся из колонок, посчитанных compute_features_and_indicators(),
+        # никакого альтернативного пересчёта здесь быть не должно.
         raw_features = {
             'signal_type': sig_type_val,
             'aimfi': curr_mfi,
-            'aimfi_diff1': row.get('aimfi_diff1', curr_mfi - prev_mfi),
-            'aimfi_diff3': row.get('aimfi_diff3', curr_mfi - df.iloc[i - 3]['aimfi'] if i >= 3 else 0.0),
-            'atr_norm': row.get('atr_norm', row['atr'] / row['close']),
-            'vol_ratio': row.get('vol_ratio', 1.0),
-            'body_ratio': row.get('body_ratio', 0.5),
-            'upper_shade_ratio': row.get('upper_shade_ratio', 0.2),
-            'lower_shade_ratio': row.get('lower_shade_ratio', 0.2),
-            'dist_ema10': row.get('dist_ema10', (row['close'] - row['ema10']) / row['ema10']),
+            'aimfi_diff1': row['aimfi_diff1'],
+            'aimfi_accel': row['aimfi_accel'],
+            'bb_z_score': row['bb_z_score'],
+            'atr_norm': row['atr_norm'],
+            'atr_regime': row['atr_regime'],
+            'dist_to_high_20': row['dist_to_high_20'],
+            'dist_to_low_20': row['dist_to_low_20'],
+            'vol_ratio': row['vol_ratio'],
+            'vol_accel': row['vol_accel'],
+            'vol_5d_ratio': row['vol_5d_ratio'],
+            'dist_ema10': row['dist_ema10'],
             'htf_slope': htf_slope,
-            'hour': row['time'].hour if hasattr(row['time'], 'hour') else 0,
-            'dayofweek': row['time'].dayofweek if hasattr(row['time'], 'dayofweek') else 0,
+            'dist_htf_ema10': dist_htf_ema10,
+            'body_ratio': row['body_ratio'],
+            'upper_shade_ratio': row['upper_shade_ratio'],
+            'lower_shade_ratio': row['lower_shade_ratio'],
+            'hour_sin': row['hour_sin'],
+            'hour_cos': row['hour_cos'],
+            'dayofweek': row['dayofweek'],
         }
 
         # Выравнивание признаков строго под FEATURE_COLS модели

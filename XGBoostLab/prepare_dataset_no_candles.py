@@ -5,8 +5,7 @@ from datetime import datetime
 from typing import Tuple, Optional
 
 # Импорт вашего адаптивного MFI
-from trading.pattern_detector.indicators.mfi import AdaptiveMFIIndicator
-
+from indicators.mfi import AdaptiveMFIIndicator
 
 def compute_features_and_indicators(
     df_10m: pd.DataFrame, 
